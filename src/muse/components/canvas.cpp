@@ -29,8 +29,6 @@
 #include <QApplication>
 #include <QCursor>
 #include <QScreen>
-#include <QVariantAnimation>
-#include <QEasingCurve>
 // Qt6: QDesktopWidget was removed; QScreen (above) is the modern replacement
 //  for screen-geometry queries.
 
@@ -86,9 +84,6 @@ Canvas::Canvas(QWidget* parent, int sx, int sy, const char* name)
       scrollTimer=nullptr;
       ignore_mouse_move = false;
       resizeDirection= MusECore::ResizeDirection::RESIZE_TO_THE_RIGHT;
-
-      _hWheelScrollAnim = nullptr;
-      _vWheelScrollAnim = nullptr;
 
       supportsResizeToTheLeft = false;
       supportsMultipleResize = false;
@@ -583,9 +578,6 @@ void Canvas::draw(QPainter& p, const QRect& mr, const QRegion& mrg)
 #define WHEEL_STEPSIZE 50
 //#define WHEEL_DELTA   120
 
-// Duration of the eased wheel-scroll animation (see smoothScrollBy()) in ms.
-#define WHEEL_SCROLL_ANIM_DURATION_MS 300
-
 //---------------------------------------------------------
 //   wheelEvent
 //---------------------------------------------------------
@@ -645,8 +637,14 @@ void Canvas::wheelEvent(QWheelEvent* ev)
         }
         int scrollstep = wheel_step_sz * (scrolldelta);
         scrollstep = scrollstep / 10;
+        int newXpos = xpos + xpixelscale * scrollstep;
 
-        smoothScrollBy(_hWheelScrollAnim, xpixelscale * scrollstep, true);
+        if (newXpos < 0) {
+          newXpos = 0;
+        }
+
+        emit horizontalScroll((unsigned)newXpos);
+
     }
 
     if (!shift && delta.y() != 0) { // scroll vertically
@@ -659,64 +657,13 @@ void Canvas::wheelEvent(QWheelEvent* ev)
 
         int scrollstep = wheel_step_sz * (-scrolldelta);
         scrollstep = scrollstep / 2;
+        int newYpos = ypos + ypixelscale * scrollstep;
 
-        smoothScrollBy(_vWheelScrollAnim, ypixelscale * scrollstep, false);
+        if (newYpos < 0)
+              newYpos = 0;
+
+        emit verticalScroll((unsigned)newYpos);
     }
-}
-
-//---------------------------------------------------------
-//   smoothScrollBy
-//   Animates horizontalScroll()/verticalScroll() towards
-//   (current settled position + delta) over
-//   WHEEL_SCROLL_ANIM_DURATION_MS, easing out, instead of jumping there
-//   instantly. If an animation for this axis is already running (e.g. the
-//   user keeps turning the wheel before the previous step finished), the
-//   new delta extends that animation's target rather than restarting from
-//   the settled position, so a burst of wheel events still feels
-//   continuous rather than stuttering between separate short animations.
-//   'anim' is one of Canvas::_hWheelScrollAnim/_vWheelScrollAnim, lazily
-//   created here on first use. 'horizontal' selects which of
-//   horizontalScroll()/verticalScroll() the animation drives.
-//---------------------------------------------------------
-void Canvas::smoothScrollBy(QVariantAnimation*& anim, int delta, bool horizontal)
-{
-    if (delta == 0)
-      return;
-
-    if (!anim) {
-      anim = new QVariantAnimation(this);
-      anim->setEasingCurve(QEasingCurve::OutCubic);
-      if (horizontal)
-        connect(anim, &QVariantAnimation::valueChanged, this, [this](const QVariant& v) {
-              emit horizontalScroll((unsigned)qMax(0, v.toInt()));
-              });
-      else
-        connect(anim, &QVariantAnimation::valueChanged, this, [this](const QVariant& v) {
-              emit verticalScroll((unsigned)qMax(0, v.toInt()));
-              });
-    }
-
-    const int settledPos = horizontal ? xpos : ypos;
-    int startVal  = settledPos;
-    int baseTarget = settledPos;
-    if (anim->state() == QAbstractAnimation::Running) {
-      // Continue smoothly from wherever the animation currently is,
-      // extending its existing target rather than the (stale) settled
-      // xpos/ypos, which won't be updated again until the animation
-      // finishes.
-      startVal   = anim->currentValue().toInt();
-      baseTarget = anim->endValue().toInt();
-    }
-
-    int target = baseTarget + delta;
-    if (target < 0)
-      target = 0;
-
-    anim->stop();
-    anim->setDuration(WHEEL_SCROLL_ANIM_DURATION_MS);
-    anim->setStartValue(startVal);
-    anim->setEndValue(target);
-    anim->start();
 }
 
 void Canvas::redirectedWheelEvent(QWheelEvent* ev)

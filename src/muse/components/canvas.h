@@ -44,7 +44,6 @@ class QTimer;
 class QWheelEvent;
 class QMouseEvent;
 class QKeyEvent;
-class QVariantAnimation;
 
 namespace MusECore {
 class Undo;
@@ -107,13 +106,6 @@ class Canvas : public View {
       bool canScrollUp;
       bool canScrollDown;
 
-      // Eased wheel-scroll animations (see wheelEvent()/smoothScrollBy()).
-      // Rather than jumping straight to the target position on every wheel
-      // event, each axis animates towards it over a short duration. Lazily
-      // created on first use.
-      QVariantAnimation* _hWheelScrollAnim;
-      QVariantAnimation* _vWheelScrollAnim;
-
       CItemMap items;
       CItemMap moving;
       CItem* newCItem;
@@ -154,7 +146,6 @@ class Canvas : public View {
       virtual void viewMouseReleaseEvent(QMouseEvent*);
       virtual void draw(QPainter& p, const QRect& mr, const QRegion& mrg = QRegion());
       virtual void wheelEvent(QWheelEvent* e);
-      void smoothScrollBy(QVariantAnimation*& anim, int delta, bool horizontal);
 
       virtual void keyPress(QKeyEvent*);
       virtual void keyRelease(QKeyEvent*);
