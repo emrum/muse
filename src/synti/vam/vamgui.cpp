@@ -227,8 +227,19 @@ VAMGui::VAMGui()
 
 
 	for (int i = 0; i < NUM_CONTROLLER; ++i) {
-		if (dctrl[i].type == SynthGuiCtrl::SLIDER)
+		if (dctrl[i].type == SynthGuiCtrl::SLIDER) {
 			connect((QSlider*)(dctrl[i].editor), &QSlider::valueChanged, [this, i]() { ctrlChanged(i); } );
+			// Was auto-wired via vamguibase.ui's <connections> (slider
+			//  valueChanged(int) -> QLCDNumber display(int)) for all 26
+			//  slider/LCD pairs. Moved here: QLCDNumber::display is
+			//  overloaded (int/double/QString), and some uic versions
+			//  don't disambiguate it correctly when generating the
+			//  pointer-based connect() call for that auto-connection,
+			//  causing a "couldn't deduce template parameter" compile
+			//  error. QOverload<int>::of() sidesteps that entirely.
+			connect((QSlider*)(dctrl[i].editor), &QSlider::valueChanged,
+			        (QLCDNumber*)(dctrl[i].label), QOverload<int>::of(&QLCDNumber::display));
+		}
 		else if (dctrl[i].type == SynthGuiCtrl::COMBOBOX)
 			// Special for these two: Need qt helper overload for these lambdas.
 			//connect((QComboBox*)(dctrl[i].editor), (void (QComboBox::*)(const QString &))&QComboBox::activated, [this, i] { ctrlChanged(i); } );

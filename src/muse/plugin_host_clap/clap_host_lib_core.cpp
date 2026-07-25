@@ -38,8 +38,10 @@
 #include "clap_host_lib.h"
 #include "clap_host_synth.h"    // ClapSynth : public Synth (factory/desc/paramIds/paramInfo)
 #include "audio.h"        // MusEGlobal::audio->isAudioThread(), msgClapStopProcessing()
+#include "song.h"         // MusEGlobal::song->loop()/lPos()/rPos(); also pulls in tempo.h/sig.h
+                           // for MusEGlobal::tempomap / MusEGlobal::sigmap (real transport state)
 #include "globals.h"
-#include "gconfig.h"      // MusEGlobal::config.useDenormalBias
+#include "gconfig.h"      // MusEGlobal::config.useDenormalBias, MusEGlobal::config.division
 
 namespace MusECore {
 
@@ -218,6 +220,58 @@ bool ClapInstanceCore::init(ClapSynth* s, const QString& displayName)
                      _plugin->get_extension(_plugin, CLAP_EXT_TIMER_SUPPORT));
   _extPosixFd    = static_cast<const clap_plugin_posix_fd_support_t*>(
                      _plugin->get_extension(_plugin, CLAP_EXT_POSIX_FD_SUPPORT));
+  _extNotePorts  = static_cast<const clap_plugin_note_ports_t*>(
+                     _plugin->get_extension(_plugin, CLAP_EXT_NOTE_PORTS));
+
+  // --- Negotiate note dialect (CLAP native vs. raw MIDI) ---
+  // Every plugin tested so far accepts CLAP_NOTE_DIALECT_CLAP, so this
+  // host always sent native CLAP_EVENT_NOTE_ON/OFF unconditionally. A
+  // plugin whose main input note port only declares MIDI dialect support
+  // (no CLAP_NOTE_DIALECT_CLAP) would silently receive no notes at all
+  // from that unconditional path. Query the main input note port once
+  // here (same pattern as the audio-ports enumeration above) and record
+  // which dialect callers (ClapSynthIF::processEvent) should encode notes
+  // as; _useClapNoteDialect defaults to true so plugins with no
+  // note-ports extension, or no input note ports, keep today's behaviour.
+  if(_extNotePorts)
+  {
+    const uint32_t noteInCount = _extNotePorts->count(_plugin, true);
+    int mainNoteInIdx = -1;
+    clap_note_port_info_t mainNoteInfo{};
+    for(uint32_t p = 0; p < noteInCount; ++p)
+    {
+      clap_note_port_info_t ni{};
+      if(!_extNotePorts->get(_plugin, p, true, &ni))
+        continue;
+      // note-ports has no IS_MAIN flag (unlike audio-ports); by convention
+      // port 0 is the primary input note port.
+      if(mainNoteInIdx < 0)
+      {
+        mainNoteInIdx = static_cast<int>(p);
+        mainNoteInfo  = ni;
+      }
+    }
+    if(mainNoteInIdx >= 0)
+    {
+      if(mainNoteInfo.supported_dialects & CLAP_NOTE_DIALECT_CLAP)
+        _useClapNoteDialect = true;
+      else if(mainNoteInfo.supported_dialects &
+              (CLAP_NOTE_DIALECT_MIDI | CLAP_NOTE_DIALECT_MIDI_MPE | CLAP_NOTE_DIALECT_MIDI2))
+        _useClapNoteDialect = false;
+      else
+      {
+        // Spec violation (a declared note port with no recognized dialect):
+        // fall back to native CLAP events, same as the no-note-ports case.
+        fprintf(stderr,
+          "ClapInstanceCore::init '%s': main input note port declared no "
+          "recognized dialect (supported_dialects=0x%x) — defaulting to "
+          "CLAP native note events\n",
+          _displayName.toLocal8Bit().constData(), mainNoteInfo.supported_dialects);
+        _useClapNoteDialect = true;
+      }
+    }
+    // else: extension present but zero input note ports -> keep default (true).
+  }
 
   // --- Count audio channels across all ports ---
   // Only the MAIN port in each direction is exposed here. Non-main ports
@@ -894,37 +948,71 @@ clap_process_status ClapInstanceCore::runProcess(int64_t steadyTime, uint32_t nf
     }
   }
 
-  // Was: `proc.transport = nullptr; // TODO: fill transport info`.
-  // Leaving this null means plugin_base's pb_plugin.cpp falls back to
-  // `block.shared.bpm = 0` (see pb_plugin.cpp around line 663-668: it only
-  // reads process->transport->tempo when process->transport is non-null).
-  // Firefly's default patch has a tempo-synced feedback delay active out
-  // of the box (fx.cpp's init_global_default() sets the global FX slot to
-  // "Delay" / "Feedback" / "Tempo Sync: On"). With bpm=0, converting a
-  // note-division time signature to seconds divides by tempo -> inf, which
-  // then gets cast to int for the delay buffer's tap index
-  // (process_dly_fdbk_sync in fx.cpp) -- an out-of-range float-to-int cast,
-  // undefined behavior in C++ but deterministic in practice on x86 (yields
-  // INT_MIN). That corrupts the feedback tap position into something that
-  // no longer decays as intended, which is what's producing the runaway
-  // growth several seconds into playback. A real host must always provide
-  // *some* valid tempo; 120 BPM / 4:4 / playing is a reasonable default
-  // until this is wired up to the actual host transport/song state.
+  // Was: `proc.transport = nullptr; // TODO: fill transport info`, then later a
+  // hardcoded-120bpm/4:4/always-playing stopgap (see the CLAP TODO writeup
+  // for why a null or zero tempo is a genuine crash-class bug — Firefly's
+  // default tempo-synced feedback delay divides by tempo, and a zero/invalid
+  // value produces an out-of-range float-to-int cast, UB).
+  // Now pulled from MusE's real sequencer state each block, the same way
+  // lv2host.cpp's runProcess-time transport update does it:
+  //  - cur_frame/cur_tick from MusEGlobal::audio->pos()/tickPos()
+  //  - play/record/loop state from MusEGlobal::audio->isPlaying()/isRecording()
+  //    and MusEGlobal::song->loop()
+  //  - tempo from MusEGlobal::tempomap.bpm(cur_tick) (honours the tempo list,
+  //    not just the static/global tempo)
+  //  - time signature from MusEGlobal::sigmap.timesig(cur_tick, ...)
+  // song_pos_beats/loop_*_beats are derived from ticks/division (quarter-note
+  // units, matching CLAP's "beats" semantic) rather than seconds*bpm/60, so
+  // they stay correct across tempo changes within the song instead of only
+  // being right for a constant tempo held since position 0.
+  const unsigned curFrame = MusEGlobal::audio->pos().frame();
+  const unsigned curTick  = MusEGlobal::audio->tickPos();
+  const bool curIsPlaying   = MusEGlobal::audio->isPlaying();
+  const bool curIsRecording = MusEGlobal::audio->isRecording();
+  const bool curIsLooping   = MusEGlobal::song && MusEGlobal::song->loop();
+  const double division = static_cast<double>(MusEGlobal::config.division > 0 ?
+                                               MusEGlobal::config.division : 384);
+
+  double curBpm = static_cast<double>(MusEGlobal::tempomap.bpm(curTick));
+  if(curBpm <= 0.0)
+    curBpm = 120.0; // defensive: never hand the plugin a zero/invalid tempo
+
+  int tsigZ = 4, tsigN = 4;
+  MusEGlobal::sigmap.timesig(curTick, tsigZ, tsigN);
+
   clap_event_transport_t transport{};
   transport.header.size     = sizeof(transport);
   transport.header.type     = CLAP_EVENT_TRANSPORT;
   transport.header.time     = 0;
   transport.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
   transport.flags = CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_BEATS_TIMELINE |
-                     CLAP_TRANSPORT_HAS_SECONDS_TIMELINE | CLAP_TRANSPORT_HAS_TIME_SIGNATURE |
-                     CLAP_TRANSPORT_IS_PLAYING;
-  transport.tempo     = 120.0;
-  transport.tempo_inc = 0.0;
-  const double songPosSeconds = (double)steadyTime / (double)MusEGlobal::sampleRate;
+                     CLAP_TRANSPORT_HAS_SECONDS_TIMELINE | CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
+  if(curIsPlaying)   transport.flags |= CLAP_TRANSPORT_IS_PLAYING;
+  if(curIsRecording) transport.flags |= CLAP_TRANSPORT_IS_RECORDING;
+  if(curIsLooping)   transport.flags |= CLAP_TRANSPORT_IS_LOOP_ACTIVE;
+
+  transport.tempo     = curBpm;
+  transport.tempo_inc = 0.0; // MusE doesn't report an instantaneous tempo slope here;
+                             // plugins re-read tempo every block instead.
+
+  const double songPosSeconds = static_cast<double>(curFrame) / static_cast<double>(MusEGlobal::sampleRate);
+  const double songPosBeats   = static_cast<double>(curTick) / division; // quarter notes since tick 0
   transport.song_pos_seconds = (clap_sectime)std::llround(songPosSeconds * CLAP_SECTIME_FACTOR);
-  transport.song_pos_beats   = (clap_beattime)std::llround(songPosSeconds * (transport.tempo / 60.0) * CLAP_BEATTIME_FACTOR);
-  transport.tsig_num   = 4;
-  transport.tsig_denom = 4;
+  transport.song_pos_beats   = (clap_beattime)std::llround(songPosBeats * CLAP_BEATTIME_FACTOR);
+  transport.tsig_num   = static_cast<uint16_t>(tsigZ);
+  transport.tsig_denom = static_cast<uint16_t>(tsigN);
+
+  if(curIsLooping && MusEGlobal::song)
+  {
+    const double loopStartSeconds = static_cast<double>(MusEGlobal::song->lPos().frame()) / static_cast<double>(MusEGlobal::sampleRate);
+    const double loopEndSeconds   = static_cast<double>(MusEGlobal::song->rPos().frame()) / static_cast<double>(MusEGlobal::sampleRate);
+    const double loopStartBeats   = static_cast<double>(MusEGlobal::song->lPos().tick()) / division;
+    const double loopEndBeats     = static_cast<double>(MusEGlobal::song->rPos().tick()) / division;
+    transport.loop_start_seconds = (clap_sectime)std::llround(loopStartSeconds * CLAP_SECTIME_FACTOR);
+    transport.loop_end_seconds   = (clap_sectime)std::llround(loopEndSeconds   * CLAP_SECTIME_FACTOR);
+    transport.loop_start_beats   = (clap_beattime)std::llround(loopStartBeats * CLAP_BEATTIME_FACTOR);
+    transport.loop_end_beats     = (clap_beattime)std::llround(loopEndBeats   * CLAP_BEATTIME_FACTOR);
+  }
 
   clap_process_t proc{};
   proc.steady_time         = steadyTime;
@@ -1176,9 +1264,9 @@ void ClapInstanceCore::deactivateAllBeforeAudioShutdown(int perInstanceTimeoutMs
   // getData()->runProcess() path, which is skipped when idle and caused the
   // 3000ms timeouts. plugin->deactivate() is [main-thread] and is done here.
   //
-  // perInstanceTimeoutMs is now unused??? — the message round-trip is
-  // synchronous (sendMsg blocks until the audio thread confirms), so there's
-  // nothing to poll. Kept for API/header compatibility.
+  // perInstanceTimeoutMs is unused — msgClapStopProcessing() now has its own
+  // fixed 4s bound on the sendMsg() round-trip (see seqmsg.cpp), rather than
+  // a per-instance polled timeout. Kept for API/header compatibility.
   (void)perInstanceTimeoutMs;
 
   const std::vector<ClapInstanceCore*> instances = s_liveInstances;

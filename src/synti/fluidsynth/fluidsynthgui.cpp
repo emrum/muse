@@ -86,6 +86,15 @@ FluidSynthGui::FluidSynthGui()
       ReverbWidth->setValue((int)(16383*FS_PREDEF_REVERB_WIDTH));*/
 
       connect(Gain, SIGNAL(valueChanged(int)), SLOT(changeGain(int)));
+      // Was auto-wired via fluidsynthguibase.ui's <connections> (Gain
+      //  valueChanged(int) -> labelGainValue setNum(int)). Moved here:
+      //  QLabel::setNum is overloaded (int/double), and some uic versions
+      //  don't disambiguate it correctly when generating a pointer-based
+      //  connect() for that auto-connection - same class of bug as
+      //  QLCDNumber::display in vam/vamgui.cpp. Old-style SIGNAL/SLOT
+      //  macro connect is immune to it (no compile-time overload
+      //  resolution involved), and matches this file's existing style.
+      connect(Gain, SIGNAL(valueChanged(int)), labelGainValue, SLOT(setNum(int)));
       connect(dumpInfoButton	, SIGNAL(clicked()), SLOT(dumpInfo()));
       connect(channelListView, SIGNAL(itemClicked(QTableWidgetItem*)),
          this, SLOT(channelItemClicked(QTableWidgetItem*)));

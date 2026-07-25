@@ -181,7 +181,13 @@ SET(MusE_VERSION_PATCH 1)
 SET(MusE_VERSION       "5.0.1")
 SET(MusE_VERSION_FULL  "5.0.1-beta")
 SET(MusE_INSTALL_NAME  "muse-5.0")
-SET(MusE_EXEC_NAME     "muse5")
+
+# Binary names carry MAJOR.MINOR (not PATCH) so a v4 install isn't clobbered
+# and so a full x.y bump is the only time these actually change - derived
+# from MusE_VERSION_MAJOR/MINOR above rather than hardcoded, so they can't
+# drift out of sync with MusE_VERSION on a version bump.
+SET(MusE_EXEC_NAME             "muse-${MusE_VERSION_MAJOR}.${MusE_VERSION_MINOR}")
+SET(MusE_PLUGIN_SCAN_EXEC_NAME "muse_plugin_scan-${MusE_VERSION_MAJOR}.${MusE_VERSION_MINOR}")
 
 SET(MusE_BIN_DIR ${CMAKE_INSTALL_PREFIX}/bin)
 
@@ -974,8 +980,8 @@ IF(EXISTS "${CMAKE_ROOT}/Modules/CPack.cmake")
   SET(CPACK_SYSTEM_NAME ${CMAKE_SYSTEM_NAME})
 
   SET(CPACK_PACKAGE_FILE_NAME "${CPACK_SOURCE_PACKAGE_FILE_NAME}-${CPACK_SYSTEM_NAME}")
-  SET(CPACK_STRIP_FILES "bin/muse;bin/grepmidi;bin/muse_plugin_scan")
-  SET(CPACK_PACKAGE_EXECUTABLES "muse" "MusE" "grepmidi" "grepmidi" "muse_plugin_scan" "muse_plugin_scan")
+  SET(CPACK_STRIP_FILES "bin/${MusE_EXEC_NAME};bin/grepmidi;bin/${MusE_PLUGIN_SCAN_EXEC_NAME}")
+  SET(CPACK_PACKAGE_EXECUTABLES "${MusE_EXEC_NAME}" "MusE" "grepmidi" "grepmidi" "${MusE_PLUGIN_SCAN_EXEC_NAME}" "${MusE_PLUGIN_SCAN_EXEC_NAME}")
   INCLUDE(CPack)
 ENDIF(EXISTS "${CMAKE_ROOT}/Modules/CPack.cmake")
 

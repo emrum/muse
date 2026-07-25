@@ -340,4 +340,22 @@ std::optional<MuseTheme> MuseTheme::fromJsonPath(const QString& jsonPath)
   return fromJsonDoc(doc);
 }
 
+//---------------------------------------------------------
+//   MuseStyle::menuBackgroundColor
+//---------------------------------------------------------
+
+QColor const& MuseStyle::menuBackgroundColor() const
+{
+  // Was (implicitly, via the base class): theme().backgroundColorMain1.
+  // That's already independent of secondaryColor, so simply routing
+  // through here doesn't change appearance by itself - it's the extension
+  // point for whatever popup-background tuning MusE actually needs (a
+  // slightly different elevation, a dedicated museColors field, etc.),
+  // kept separate from QlementineStyle::menuBackgroundColor()'s base
+  // behaviour so a future change here can never again accidentally alias
+  // Theme::secondaryColor (or any other foreground-role color) the way
+  // the old code did.
+  return oclero::qlementine::QlementineStyle::menuBackgroundColor();
+}
+
 } // namespace MusEGui

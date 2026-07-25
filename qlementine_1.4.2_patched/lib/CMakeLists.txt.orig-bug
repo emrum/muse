@@ -143,18 +143,9 @@ set_target_properties(${PROJECT_NAME}
     SOVERSION ${PROJECT_VERSION_MAJOR}
     VERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
     DEBUG_POSTFIX _debug
-    AUTORCC ON
-    AUTOMOC ON
-    AUTOUIC ON
-    # This is a STATIC library (see qt_add_library() above), but consumers
-    # (e.g. MusE) may link it into a shared library (.so). Object code
-    # destined for a .so must be position-independent, or linking fails
-    # with e.g. "relocation R_X86_64_PC32 ... can not be used when making
-    # a shared object; recompile with -fPIC". Setting this here makes the
-    # library correct to consume from a shared-library context by itself,
-    # rather than depending on the parent project happening to set
-    # -fPIC/CMAKE_POSITION_INDEPENDENT_CODE before this target is created.
-    POSITION_INDEPENDENT_CODE ON
+    CMAKE_AUTORCC ON
+    CMAKE_AUTOMOC ON
+    CMAKE_AUTOUIC ON
 )
 
 target_compile_options(${PROJECT_NAME}

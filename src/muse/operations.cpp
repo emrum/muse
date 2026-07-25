@@ -1824,6 +1824,30 @@ SongChangedStruct_t PendingOperationItem::executeNonRTStage()
         fprintf(stderr, "PendingOperationItem::executeNonRTStage DeleteMidiDevice: _midi_device is null\n");
         break;
       }
+      // A SynthI is BOTH a MidiDevice and a Track (it multiply-inherits
+      //  AudioTrack + MidiDevice), and it is owned by the TRACK side, not by
+      //  the device list. Deleting it here frees the Track sub-object too,
+      //  while Song::removeTrackOperation()'s parallel UndoOp::DeleteTrack
+      //  entry still holds that pointer - so:
+      //    - undoing the track deletion resurrects freed memory
+      //      (heap-use-after-free, see the note in Song::executeOperationGroup3),
+      //    - and at quit, deleteUndoOp() deletes it a SECOND time
+      //      (SIGSEGV with a garbage vptr in the Track destructor).
+      // Song::cleanupForQuit() states the same ownership rule where it walks
+      //  MusEGlobal::midiDevices: "Since Syntis are midi devices, there's no
+      //  need to delete them below" - it skips isSynti() devices and lets the
+      //  track/undo side free them. Mirror that here. Non-track devices
+      //  (MidiJackDevice, MidiAlsaDevice, ...) are still deleted, which is what
+      //  this delete was added for: MidiDevice's virtual destructor also
+      //  unregisters a MidiJackDevice's Jack ports, and previously nothing
+      //  ever deleted those - leaking both the object and its Jack ports.
+      if(_midi_device->isSynti())
+      {
+        DEBUG_OPERATIONS(stderr, "PendingOperationItem::executeNonRTStage DeleteMidiDevice: "
+                                 "device:%p is a SynthI - track/undo side owns it, not deleting\n",
+                         _midi_device);
+        break;
+      }
       delete _midi_device;
     break;
 

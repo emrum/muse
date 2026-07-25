@@ -27,6 +27,7 @@
 #include <optional>
 
 #include <oclero/qlementine/style/Theme.hpp>
+#include <oclero/qlementine/style/QlementineStyle.hpp>
 
 #include <QString>
 #include <QJsonDocument>
@@ -90,6 +91,41 @@ private:
   //  field untouched (whatever it already was - typically the compiled-in
   //  default, unless a previous theme load already changed it).
   static void loadMuseColors(const QJsonObject& museColorsObj);
+};
+
+//---------------------------------------------------------
+//   MuseStyle
+//    Thin subclass of QlementineStyle (the QStyle Qlementine uses to paint
+//    *standard* Qt widgets - MuseTheme above is its color/data source, this
+//    is the class that does the actual painting). Installed app-wide in
+//    main.cpp instead of the stock oclero::qlementine::QlementineStyle.
+//
+//    Exists to decouple colors Theme ties together only by accident of
+//    shared field reuse, without patching Qlementine itself - every
+//    override here goes through a documented, public "virtual" extension
+//    point QlementineStyle already provides for exactly this purpose (see
+//    its header's "Theme-related methods" section).
+//
+//    Concretely: Theme::secondaryColor is Qlementine's secondary
+//    action/foreground color (button fills, QGroupBox label text, etc.),
+//    NOT a background/surface color - but MusE toolbar code (ArrangerToolbar
+//    and friends in components/*toolbar*.cpp) legitimately uses it for
+//    label text, which is its correct semantic role. A popup background
+//    that was (indirectly) also tracking secondaryColor caused popup bg
+//    and toolbar label text to move together, sometimes colliding (dark
+//    text on a bright popup). QlementineStyle's real popup background is
+//    menuBackgroundColor(), which normally returns theme.backgroundColorMain1
+//    - already independent of secondaryColor. Overriding it here makes
+//    that independence explicit and gives MusE its own place to tune the
+//    popup surface further, permanently separate from any foreground-role
+//    color like secondaryColor.
+//---------------------------------------------------------
+
+class MuseStyle : public oclero::qlementine::QlementineStyle {
+public:
+  explicit MuseStyle(QObject* parent = nullptr) : oclero::qlementine::QlementineStyle(parent) {}
+
+  QColor const& menuBackgroundColor() const override;
 };
 
 } // namespace MusEGui

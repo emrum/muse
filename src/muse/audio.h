@@ -293,7 +293,20 @@ class Audio {
       void msgUpdateSoloStates();
       void msgSetAux(AudioTrack*, int, double);
       void msgPanic();
-      void sendMsg(AudioMsg*);
+      // timeoutMs < 0 (default): unchanged, unconditional blocking read - use for
+      //  normal RT-thread round trips where the audio thread is expected to always
+      //  be servicing messages.
+      // timeoutMs >= 0: bounded wait via poll() before the read(). If the audio
+      //  thread doesn't ack within timeoutMs, logs a warning and returns WITHOUT
+      //  reading - the caller proceeds without confirmation instead of hanging
+      //  forever (see msgClapStopProcessing()/deactivateAllBeforeAudioShutdown()).
+      //  NOTE: if the audio thread eventually does write the ack after we've
+      //  given up waiting, that stray int is left sitting in the pipe and will
+      //  be consumed by whatever the NEXT sendMsg() call happens to be, which
+      //  will then read a serial-number mismatch (logged, non-fatal) instead of
+      //  its own ack. Acceptable for a shutdown-only, called-once site; not
+      //  something to build a general habit of using with unbounded call sites.
+      void sendMsg(AudioMsg*, int timeoutMs = -1);
       bool sendMessage(AudioMsg* m, bool doUndo);
       void msgRemoveRoute(Route, Route);
       void msgRemoveRoute1(Route, Route); 

@@ -26,9 +26,12 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <fcntl.h>   // fcntl(F_GETFD) - fd liveness check, see clapFdStillOpen()
 
 #include <QWidget>
+#include <QCloseEvent>
 #include <QGuiApplication>
+#include <QCoreApplication>
 #include <QTimer>
 #include <QSocketNotifier>
 
@@ -116,6 +119,65 @@ static const clap_host_posix_fd_support_t s_hostPosixFdExt = {
 const clap_host_posix_fd_support_t* clapCorePosixFdHostExt() { return &s_hostPosixFdExt; }
 
 //---------------------------------------------------------
+//   clapFdStillOpen
+//   True if fd is still a valid open descriptor in this process.
+//   Tells apart the two plugin styles of X11 display ownership: plugins that
+//   keep one display connection for the whole instance lifetime (u-he) leave
+//   the fd open across GUI create/destroy cycles, while plugins that open the
+//   display inside gui->create() and close it in gui->destroy() (the common
+//   toolkit pattern) leave us holding a QSocketNotifier on a closed fd - which
+//   Qt permanently disables, after which the plugin never receives another X11
+//   event and its re-created GUI stays black.
+//---------------------------------------------------------
+
+static bool clapFdStillOpen(int fd)
+{
+  return fd >= 0 && ::fcntl(fd, F_GETFD) != -1;
+}
+
+//---------------------------------------------------------
+//   ClapEditorWindow
+//   The container widget a plugin's X11/Win32/Cocoa view is embedded into.
+//   Exists only to catch the close event: clicking the window manager's X on
+//   the decoration bypasses MusE completely - Qt accepts the QCloseEvent and
+//   simply hides the widget. Nothing then tells the PLUGIN, so it keeps
+//   believing its GUI is visible, and MusE keeps believing so too. On the next
+//   open, _extGui->show() is therefore a no-op in the many plugins that
+//   early-return when already shown (and that is also where they'd force a
+//   full repaint), so the window maps but nothing ever paints into it: the
+//   black window that only happened on the WM-close path, never on MusE's own
+//   GUI toggle. Routing the close through onEditorWindowClosed() makes both
+//   paths identical.
+//   No Q_OBJECT macro on purpose - no signals/slots here, so no moc needed.
+//---------------------------------------------------------
+
+class ClapEditorWindow : public QWidget
+{
+public:
+  explicit ClapEditorWindow(ClapInstanceCore* core)
+    : QWidget(nullptr), _core(core) { }
+
+protected:
+  void closeEvent(QCloseEvent* e) override
+  {
+    if(!_core)
+    {
+      fprintf(stderr, "ClapEditorWindow::closeEvent: no core - just hiding\n");
+      QWidget::closeEvent(e);
+      return;
+    }
+    // Accept first: _core may (via the GUI-closed callback) run MusE code that
+    // ends up in destroyGui(), which deletes this widget - deferred through
+    // deleteLater() precisely so we can still be inside our own event handler.
+    e->accept();
+    _core->onEditorWindowClosed();
+  }
+
+private:
+  ClapInstanceCore* _core = nullptr;
+};
+
+//---------------------------------------------------------
 //   destroyGui
 //   Full teardown: cleanly detach from X11, destroy plugin GUI,
 //   then delete the host window.
@@ -139,6 +201,15 @@ void ClapInstanceCore::destroyGui()
     // and causes SIGSEGV in plugins like Surge XT because they attempt to
     // read the window pointer to identify the API.
     _extGui->destroy(_plugin);
+
+    // destroy() may have closed the plugin's X11 display connection. Any
+    // notifier we still hold on that fd is dead now, and hostFdRegister() used
+    // to silently skip re-registration because the fd was still in our map -
+    // so the re-created GUI never got a single X11 event and stayed black.
+    // Drop only the notifiers whose fd is really gone; plugins that keep the
+    // connection alive (see the note above) keep theirs. Runs in the same call
+    // stack as destroy(), before any event loop can recycle the fd number.
+    pruneClosedFdNotifiers();
   }
 
   _isGuiCreated  = false;
@@ -147,7 +218,13 @@ void ClapInstanceCore::destroyGui()
 
   if(_editorWindow)
   {
-    delete _editorWindow;
+    // deleteLater(), not delete: destroyGui() can be reached from inside the
+    // container's own closeEvent() (ClapEditorWindow -> onEditorWindowClosed()
+    // -> MusE's GUI-closed bookkeeping -> closeNativeGui()), and deleting a
+    // widget while its event handler is on the stack is a use-after-free.
+    // hide() first so no empty frame lingers until the event loop spins.
+    _editorWindow->hide();
+    _editorWindow->deleteLater();
     _editorWindow = nullptr;
   }
 }
@@ -235,7 +312,7 @@ void ClapInstanceCore::showNativeGui(bool v)
       }
       else
       {
-        _editorWindow = new QWidget(nullptr);
+        _editorWindow = new ClapEditorWindow(this);
         _editorWindow->setWindowTitle(_displayName);
         _editorWindow->setAttribute(Qt::WA_NativeWindow, true);
 
@@ -280,7 +357,28 @@ void ClapInstanceCore::showNativeGui(bool v)
     if(!_isGuiVisible)
     {
       if(_editorWindow)
+      {
         _editorWindow->show();
+
+        // Force the X11 map request to actually land at the server before
+        // telling the plugin to paint into the (now newly-mapped) window.
+        // On a fresh create()+set_parent() cycle - in particular after a
+        // prior destroyGui() - several plugins validate/(re)build their
+        // render surface lazily, keyed to a resize/expose signal received
+        // AFTER their parent window is mapped, not at set_parent()/
+        // resize() time (when the window was still hidden). Without this,
+        // the plugin can end up with a technically-visible but
+        // never-painted window: no crash, no black frame, just nothing
+        // drawn - see the "destroyed GUI shown again doesn't paint" report.
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+
+        if(!_isGuiFloating && _extGui->can_resize(_plugin))
+        {
+          uint32_t w = 0, h = 0;
+          if(_extGui->get_size(_plugin, &w, &h) && w > 0 && h > 0)
+            _extGui->set_size(_plugin, w, h); // same size - nudges a redraw now that we're mapped
+        }
+      }
       _extGui->show(_plugin);
       _isGuiVisible = true;
     }
@@ -314,6 +412,25 @@ void ClapInstanceCore::showNativeGui(bool v)
 void ClapInstanceCore::closeNativeGui()
 {
   destroyGui();
+}
+
+//---------------------------------------------------------
+//   onEditorWindowClosed
+//   The user closed the embedding window via the WM decoration. See
+//   ClapEditorWindow above for why this has to do more than nothing.
+//---------------------------------------------------------
+
+void ClapInstanceCore::onEditorWindowClosed()
+{
+  // Same path as MusE's own GUI toggle: this is what actually calls
+  // _extGui->hide(_plugin), so the plugin's idea of "am I visible" stays in
+  // sync with ours and its next show() really shows and repaints.
+  showNativeGui(false);
+
+  // And tell MusE, so its GUI button/pending flag clears - otherwise the first
+  // click after a WM close is swallowed toggling a state that is already false.
+  if(_onGuiHiddenByPlugin)
+    _onGuiHiddenByPlugin();
 }
 
 //---------------------------------------------------------
@@ -462,14 +579,38 @@ bool ClapInstanceCore::hostFdRegister(int fd, clap_posix_fd_flags_t flags)
     return false;
   }
 
+  if(!clapFdStillOpen(fd))
+  {
+    fprintf(stderr, "ClapInstanceCore::hostFdRegister: fd %d is not open - ignoring\n", fd);
+    return false;
+  }
+
   const clap_plugin_t* plug = _plugin;
   const clap_plugin_posix_fd_support_t* ext = _extPosixFd;
 
   auto make = [&](QHash<int, QSocketNotifier*>& map,
                   QSocketNotifier::Type type, clap_posix_fd_flags_t f)
   {
-    if(!(flags & f) || map.contains(fd))
+    if(!(flags & f))
       return;
+
+    // Always (re)create - never keep an existing notifier. A register_fd() for
+    // an fd we already track means the plugin re-opened its display connection
+    // (typically inside gui->create(), after a previous gui->destroy() closed
+    // it) and the OS handed back the same fd number. The old notifier is then
+    // stale, and Qt has usually already auto-disabled it ("QSocketNotifier:
+    // Invalid socket ... disabling"). Silently keeping it is exactly what left
+    // the re-shown GUI black: mapped window, no X11 events, nothing painted.
+    const auto it = map.find(fd);
+    if(it != map.end())
+    {
+      fprintf(stderr, "ClapInstanceCore::hostFdRegister: fd %d re-registered - "
+                      "replacing stale notifier\n", fd);
+      it.value()->setEnabled(false);
+      it.value()->deleteLater();
+      map.erase(it);
+    }
+
     QSocketNotifier* n = new QSocketNotifier(fd, type);
     QObject::connect(n, &QSocketNotifier::activated, n,
                      [plug, ext, fd, f]() { ext->on_fd(plug, fd, f); });
@@ -508,6 +649,34 @@ bool ClapInstanceCore::hostFdUnregister(int fd)
       fprintf(stderr, "ClapInstanceCore::hostFdUnregister: unknown fd %d\n", fd);
   //
   return found;
+}
+
+//---------------------------------------------------------
+//   pruneClosedFdNotifiers
+//   Drop QSocketNotifiers whose fd the plugin closed behind our back (see
+//   destroyGui()). Unlike clearGuiEventSources() this KEEPS notifiers for
+//   still-open fds, so plugins holding one display connection for the whole
+//   instance lifetime are left untouched.
+//---------------------------------------------------------
+
+void ClapInstanceCore::pruneClosedFdNotifiers()
+{
+  for(QHash<int, QSocketNotifier*>* map : { &_fdRead, &_fdWrite, &_fdError })
+  {
+    for(auto it = map->begin(); it != map->end(); )
+    {
+      if(clapFdStillOpen(it.key()))
+      {
+        ++it;
+        continue;
+      }
+      fprintf(stderr, "ClapInstanceCore::pruneClosedFdNotifiers: fd %d was closed by the "
+                      "plugin - dropping its notifier\n", it.key());
+      it.value()->setEnabled(false);
+      it.value()->deleteLater();
+      it = map->erase(it);
+    }
+  }
 }
 
 //---------------------------------------------------------

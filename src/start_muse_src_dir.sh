@@ -2,7 +2,11 @@
 
 # NOTE: fix python path below, path that has libpython3.XX.so (version that is linked by MusE)
  
-cd ../build_release/
+
+EXE="muse-5.0"
+BUILD_FOLDER="../build_release"
+
+cd $BUILD_FOLDER
 
 QT_QPA_PLATFORM=xcb \
  \
@@ -19,5 +23,5 @@ libs/memory/:\
 libs/sysex_helper/:\
 libs/xml/  \
  \
-./muse/muse4  "$@"
- 
+"$BUILD_FOLDER/muse/$EXE"  "$@"
+

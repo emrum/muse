@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <errno.h>
+#include <algorithm>   // std::find - used by seedUndoDedupFromList()
 //#include <iostream>
 
 #include <QDir>
@@ -4712,6 +4713,42 @@ void Song::panic()
       }
 
 //---------------------------------------------------------
+//   seedUndoDedupFromList
+//   Pre-seed a dedup context with the track pointers that a clearDelete() call
+//    is about to free (see UndoClearDedup in undo.h).
+//   _tracks is SUPPOSED to hold every live track, but it is not the list that
+//    frees them - the per-type lists below are. A track that was removed from
+//    _tracks while still listed in its type list would be freed by the type
+//    list and then freed AGAIN by the undo/redo cleanup: SIGSEGV in
+//    deleteUndoOp() at quit. Seeding from the type lists too closes that hole
+//    whichever side is out of sync, and warns so the real culprit (the
+//    track-removal path) can be found.
+//   Note: insert the TYPED pointers, never reinterpret_cast'd ones - SynthI
+//    multiply-inherits (AudioTrack + MidiDevice) and needs the compiler's own
+//    pointer adjustment for the set keys to compare equal.
+//---------------------------------------------------------
+
+template <typename LIST>
+static void seedUndoDedupFromList(const char* listName, const LIST& l,
+                                  const MusECore::TrackList& tracks,
+                                  MusECore::UndoClearDedup& dd)
+{
+  for(const auto* t : l)
+  {
+    if(!t)
+    {
+      fprintf(stderr, "seedUndoDedupFromList: null track in %s\n", listName);
+      continue;
+    }
+    dd.tracks.insert(t);
+    if(std::find(tracks.begin(), tracks.end(), t) == tracks.end())
+      fprintf(stderr, "seedUndoDedupFromList: track %p is in %s but NOT in _tracks "
+                      "- half-applied removal, check the track-removal path\n",
+              static_cast<const void*>(t), listName);
+  }
+}
+
+//---------------------------------------------------------
 //   clear
 //    signal - emit signals for changes if true
 //    called from constructor as clear(false) and
@@ -4736,6 +4773,19 @@ void Song::clear(bool signal, bool clear_all)
       UndoClearDedup undoRedoDedup;
       for(ciTrack it = _tracks.begin(); it != _tracks.end(); ++it)
         undoRedoDedup.tracks.insert(*it);
+
+      // _tracks is not what frees the tracks - the per-type lists below are.
+      //  Seed from those too, or a track missing from _tracks (but still in its
+      //  type list) gets freed twice. See seedUndoDedupFromList() above.
+      seedUndoDedupFromList("_midis",   _midis,   _tracks, undoRedoDedup);
+      seedUndoDedupFromList("_waves",   _waves,   _tracks, undoRedoDedup);
+      seedUndoDedupFromList("_inputs",  _inputs,  _tracks, undoRedoDedup);
+      seedUndoDedupFromList("_outputs", _outputs, _tracks, undoRedoDedup);
+      seedUndoDedupFromList("_groups",  _groups,  _tracks, undoRedoDedup);
+      seedUndoDedupFromList("_auxs",    _auxs,    _tracks, undoRedoDedup);
+      // NOTE: unlike cleanupForQuit(), clear() never calls _synthIs.clearDelete(),
+      //  so synth tracks are NOT freed here - do not seed _synthIs, or a
+      //  DeleteTrack undo entry for a synth would be skipped and leak instead.
 
       // Clear any midi control assignments.
       _midiAssignments.clear();
@@ -4886,6 +4936,17 @@ void Song::cleanupForQuit()
       UndoClearDedup undoRedoDedup;
       for(ciTrack it = _tracks.begin(); it != _tracks.end(); ++it)
         undoRedoDedup.tracks.insert(*it);
+
+      // _tracks is not what frees the tracks - the per-type lists below are.
+      //  Seed from those too, or a track missing from _tracks (but still in its
+      //  type list) gets freed twice. See seedUndoDedupFromList() above.
+      seedUndoDedupFromList("_midis",   _midis,   _tracks, undoRedoDedup);
+      seedUndoDedupFromList("_waves",   _waves,   _tracks, undoRedoDedup);
+      seedUndoDedupFromList("_inputs",  _inputs,  _tracks, undoRedoDedup);
+      seedUndoDedupFromList("_outputs", _outputs, _tracks, undoRedoDedup);
+      seedUndoDedupFromList("_groups",  _groups,  _tracks, undoRedoDedup);
+      seedUndoDedupFromList("_auxs",    _auxs,    _tracks, undoRedoDedup);
+      seedUndoDedupFromList("_synthIs", _synthIs, _tracks, undoRedoDedup);
 
       _tracks.clear();
       

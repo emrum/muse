@@ -7,6 +7,7 @@
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # echo "This bash script is located in: $SCRIPT_DIR"
 
+EXE="muse-5.0"
 
 ### (optional) use virtual python environment , set QT paths
 ### WARNING: can conflict with qt5 (linked in muse) 
@@ -60,7 +61,7 @@ export LSAN_OPTIONS=suppressions="${SUPP_LSAN}"
 # 
 #  -D for DEBUG !
 # 
-/usr/local/bin/muse5     -j -J  -Y 8   --no-plugin-duplicate-warnings #  > error.log 2>&1 
+/usr/local/bin/$EXE     -j -J  -Y 8   --no-plugin-duplicate-warnings #  > error.log 2>&1 
 #
 ########################################
 

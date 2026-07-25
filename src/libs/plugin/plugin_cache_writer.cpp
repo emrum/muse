@@ -1606,9 +1606,9 @@ static bool pluginScan(
   QString prog;
   const QByteArray appDir = qgetenv("APPDIR");
   if (!appDir.isEmpty())
-      prog = appDir + QString(BINDIR) + QString("/muse_plugin_scan");
+      prog = appDir + QString(BINDIR) + QString("/") + QString(PLUGIN_SCAN_EXEC_NAME);
   else
-      prog = QString(BINDIR) + QString("/muse_plugin_scan");
+      prog = QString(BINDIR) + QString("/") + QString(PLUGIN_SCAN_EXEC_NAME);
 
   QStringList args;
   args << QString("-t") + QString::number(types) << QString("-f") + filename << QString("-o") + tmpfilename;

@@ -22,6 +22,7 @@
 //=========================================================
 
 #include <stdio.h>
+#include <poll.h>
 
 #include "song.h"
 #include "midiseq.h"
@@ -54,8 +55,9 @@ namespace MusECore {
 //   sendMsg
 //---------------------------------------------------------
 
-// this function blocks until the request has been processed
-void Audio::sendMsg(AudioMsg* m)
+// this function blocks until the request has been processed, unless
+// timeoutMs >= 0 and the audio thread doesn't ack in time - see audio.h.
+void Audio::sendMsg(AudioMsg* m, int timeoutMs)
       {
       static int sno = 0;
 
@@ -63,6 +65,28 @@ void Audio::sendMsg(AudioMsg* m)
             m->serialNo = sno++;
             //DEBUG:
             msg = m;
+
+            if(timeoutMs >= 0)
+            {
+              struct pollfd pfd;
+              pfd.fd     = fromThreadFdr;
+              pfd.events = POLLIN;
+              const int pr = poll(&pfd, 1, timeoutMs);
+              if(pr == 0)
+              {
+                fprintf(stderr,
+                  "Audio::sendMsg: timed out after %dms waiting for audio thread "
+                  "to ack message id:%d serialNo:%d - proceeding without confirmation\n",
+                  timeoutMs, (int)m->id, m->serialNo);
+                return;
+              }
+              else if(pr < 0)
+              {
+                perror("Audio::sendMsg: poll on fromThreadFdr failed");
+                return;
+              }
+            }
+
             // wait for next audio "process" call to finish operation
             int no = -1;
             int rv = read(fromThreadFdr, &no, sizeof(int));
@@ -824,13 +848,19 @@ void Audio::msgAudioWait()
 //    instances. sendMsg() blocks until processMsg() has run it on the audio
 //    thread (or, if the engine isn't running, runs it inline — callers must
 //    only use this while _running, see deactivateAllBeforeAudioShutdown()).
+//    Bounded to 4s: a misbehaving plugin's stop_processing() can deadlock
+//    against the main thread (e.g. if it needs a main-thread timer/fd
+//    callback pumped, which won't happen while we're blocked here) - rather
+//    than hang the app shutdown forever, give up after 4s and let teardown
+//    proceed anyway. See sendMsg()'s timeoutMs doc in audio.h for the
+//    stale-ack caveat this trades in for.
 //---------------------------------------------------------
 
 void Audio::msgClapStopProcessing()
       {
       AudioMsg msg;
       msg.id     = AUDIO_CLAP_STOP_PROCESSING;
-      sendMsg(&msg);
+      sendMsg(&msg, 4000);
       }
 #endif
 

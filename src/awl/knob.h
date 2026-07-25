@@ -43,7 +43,7 @@ namespace Awl {
 //!
 //---------------------------------------------------------
 
-class Q_DECL_EXPORT Knob : public AbstractSlider {
+class Knob : public AbstractSlider {
       Q_OBJECT
       Q_PROPERTY(int scaleSize READ scaleSize WRITE setScaleSize)
       Q_PROPERTY(int markSize READ markSize WRITE setMarkSize)

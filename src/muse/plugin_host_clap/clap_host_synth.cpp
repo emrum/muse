@@ -587,6 +587,21 @@ bool ClapSynthIF::processEvent(const MidiPlayEvent& e, uint32_t sampleOffset)
           default: break;
         }
       }
+      // Plugins whose main input note port only declared MIDI-dialect
+      // support (no CLAP_NOTE_DIALECT_CLAP) never see native
+      // CLAP_EVENT_NOTE_ON/OFF events — encode as raw MIDI instead so they
+      // still get the note at all. See ClapInstanceCore::init()'s
+      // note-ports negotiation.
+      if(!_core.wantsClapNoteDialect())
+      {
+        const bool isNoteOff = (evtype == CLAP_EVENT_NOTE_OFF);
+        const uint8_t data[3] = {
+          static_cast<uint8_t>((isNoteOff ? 0x80 : 0x90) | (chn & 0x0f)),
+          static_cast<uint8_t>(a & 0x7f),
+          static_cast<uint8_t>(velocity & 0x7f)
+        };
+        return _core.pushMidiEvent(data, 0, sampleOffset);
+      }
       return _core.pushNoteEvent(evtype, -1, 0, chn, a, velocity / 127.0, sampleOffset);
     }
 
@@ -594,18 +609,28 @@ bool ClapSynthIF::processEvent(const MidiPlayEvent& e, uint32_t sampleOffset)
     {
       if(nom == MidiInstrument::NoteOffNone) return false;
       int16_t evtype;
-      double  velocity;
+      int     velocity127; // raw MIDI (0-127); pushNoteEvent wants a 0-1 double instead
       if(nom == MidiInstrument::NoteOffConvertToZVNoteOn)
       {
-        evtype   = CLAP_EVENT_NOTE_ON;
-        velocity = 0.0;
+        evtype      = CLAP_EVENT_NOTE_ON;
+        velocity127 = 0;
       }
       else
       {
-        evtype   = CLAP_EVENT_NOTE_OFF;
-        velocity = b / 127.0;
+        evtype      = CLAP_EVENT_NOTE_OFF;
+        velocity127 = b;
       }
-      return _core.pushNoteEvent(evtype, -1, 0, chn, a, velocity, sampleOffset);
+      if(!_core.wantsClapNoteDialect())
+      {
+        const bool isNoteOn = (evtype == CLAP_EVENT_NOTE_ON); // zero-velocity note-on stand-in for note-off
+        const uint8_t data[3] = {
+          static_cast<uint8_t>((isNoteOn ? 0x90 : 0x80) | (chn & 0x0f)),
+          static_cast<uint8_t>(a & 0x7f),
+          static_cast<uint8_t>(velocity127 & 0x7f)
+        };
+        return _core.pushMidiEvent(data, 0, sampleOffset);
+      }
+      return _core.pushNoteEvent(evtype, -1, 0, chn, a, velocity127 / 127.0, sampleOffset);
     }
 
     case ME_PROGRAM:

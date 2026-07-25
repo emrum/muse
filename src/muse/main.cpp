@@ -72,6 +72,7 @@
 #include "helper.h"
 #ifdef QLEMENTINE_SUPPORT
 #include <oclero/qlementine/style/QlementineStyle.hpp>
+#include "muse_theme.h"
 #endif
 #include "sync.h"
 #include "functions.h"
@@ -716,7 +717,12 @@ int main(int argc, char* argv[])
         //  MusEGui::loadQlementineTheme() is called further down, since that's
         //  what actually sets the theme's colors on this style instance.
         //  This supersedes the by-name QApplication::setStyle() call above.
-        QApplication::setStyle(new oclero::qlementine::QlementineStyle(&app));
+        //  MuseStyle (thin QlementineStyle subclass, see muse_theme.h) is
+        //  installed instead of the stock class so MusE has its own
+        //  override point for color roles Qlementine's Theme couples
+        //  together in ways MusE doesn't want (e.g. popup background vs.
+        //  secondaryColor - see muse_theme.h's MuseStyle class comment).
+        QApplication::setStyle(new MusEGui::MuseStyle(&app));
 #endif
 
         qDebug() << "->" << qPrintable(QTime::currentTime().toString("hh:mm:ss.zzz"))

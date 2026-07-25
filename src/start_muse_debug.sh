@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SUPP_VALG="${SCRIPT_DIR}/misc/valgrind_muse.supp"
 SUPP_LSAN="${SCRIPT_DIR}/misc/lsan.supp"
 
-
+EXE="muse-5.0"
 
 ### (optional) use virtual python environment , set QT paths; WARNING: can conflict with QT5 linked by muse
 # if [ -n "$VIRTUAL_ENV" ]; then
@@ -64,7 +64,7 @@ export LSAN_OPTIONS=suppressions="${SUPP_LSAN}"
 # -R  Force plugin cache re-creation. 
 # 
 #  -D for DEBUG !
-/usr/local/bin/muse5  -D -D  -j -J  -Y 8   --no-plugin-duplicate-warnings  > error.log 2>&1 
+# /usr/local/bin/$EXE  -D -D  -j -J  -Y 8   --no-plugin-duplicate-warnings  > error.log 2>&1 
 #
 ########################################
 
@@ -90,18 +90,18 @@ export LSAN_OPTIONS=suppressions="${SUPP_LSAN}"
 #   --gen-suppressions=all \
 #   --num-callers=11 \
 #   --suppressions="${SUPP_VALG}" \
-#   /usr/local/bin/muse5  2> valg.out.txt
+#   /usr/local/bin/$EXE  2> valg.out.txt
 
 
 ###  only mem leaks  - USEFUL
 # valgrind --leak-check=full --show-leak-kinds=definite --track-origins=yes  \
 #    --gen-suppressions=all \
 #    --suppressions="${SUPP_VALG}" \
-#    /usr/local/bin/muse5  2> valg.out.txt
+#    /usr/local/bin/$EXE  2> valg.out.txt
 
 
 
-#gdb --args /usr/local/bin/muse5 -D -D -j -J  -Y 8   --no-plugin-duplicate-warnings  #2> error.log
+gdb --args /usr/local/bin/$EXE -D  -j -J  -Y 8   --no-plugin-duplicate-warnings  #2> error.log
 #
 # HINT: LeakSanitizer does not work under ptrace (strace, gdb, etc)
 

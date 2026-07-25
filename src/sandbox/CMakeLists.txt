@@ -35,6 +35,18 @@ add_executable ( muse_plugin_scan
       ${plugin_scan_source_files}
       )
 
+##
+## v5 and v4 installed side-by-side would otherwise collide on this binary's
+## name (both are "muse_plugin_scan"). Rename just the output file, matching
+## the MusE_EXEC_NAME convention already used for the main executable (see
+## muse/CMakeLists.txt and MusE_PLUGIN_SCAN_EXEC_NAME in the top-level
+## CMakeLists.txt, derived from MusE_VERSION_MAJOR/MINOR). The CMake target
+## name stays "muse_plugin_scan" below (target_link_libraries, install),
+## only the file that ends up on disk / in bin/ changes.
+set_target_properties ( muse_plugin_scan
+      PROPERTIES OUTPUT_NAME ${MusE_PLUGIN_SCAN_EXEC_NAME}
+      )
+
 target_link_libraries(muse_plugin_scan
       plugin_scan_module
       plugin_cache_writer_module

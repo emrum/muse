@@ -45,6 +45,7 @@
 #include <clap/ext/state.h>
 #include <clap/ext/timer-support.h>
 #include <clap/ext/posix-fd-support.h>
+#include <clap/ext/note-ports.h>
 
 class QWidget;
 class QTimer;
@@ -167,6 +168,17 @@ public:
 
   //--- GUI (clap_host_lib_gui.cpp) ---
 
+  // True if the plugin's main input note port declared support for CLAP's
+  // native note dialect (CLAP_NOTE_DIALECT_CLAP) and native note events
+  // (pushNoteEvent()) should be sent. False means the port only declared
+  // MIDI-dialect support (CLAP_NOTE_DIALECT_MIDI[_MPE|2]) — callers must
+  // translate note on/off into raw MIDI bytes and use pushMidiEvent()
+  // instead, or the plugin never sees the notes at all. Defaults to true
+  // (native dialect) if the plugin has no note-ports extension at all, or
+  // no input note ports, matching the pre-negotiation behaviour so plugins
+  // without note-ports still work exactly as before.
+  bool wantsClapNoteDialect() const { return _useClapNoteDialect; }
+
   bool hasGui()          const { return _extGui != nullptr; }
   bool nativeGuiVisible() const { return _isGuiVisible; }
   // v == true: create (if needed) + show. v == false: hide only, keeping the
@@ -189,6 +201,13 @@ public:
   // ClapPluginWrapper_State wires it to PluginIBase's equivalent.
   using GuiClosedCallback = std::function<void()>;
   void setGuiClosedCallback(GuiClosedCallback cb) { _onGuiHiddenByPlugin = std::move(cb); }
+
+  // Called when the user closes the embedding window via the window manager's
+  // decoration (the title bar's X), which bypasses MusE entirely - Qt just
+  // hides the widget. Equivalent to hostGuiClosed(false), plus the
+  // _extGui->hide() that the WM path would otherwise skip. See the note in
+  // clap_host_lib_gui.cpp.
+  void onEditorWindowClosed();
 
   //--- Host callback implementations (clap_host_lib_core.cpp) ---
 
@@ -238,6 +257,10 @@ private:
   // from destroyGui()/shutdown() so we never call on_timer()/on_fd() into a
   // plugin whose GUI is being torn down.
   void clearGuiEventSources();
+  // Drop only those QSocketNotifiers whose fd the plugin closed inside
+  // gui->destroy(); notifiers for still-open fds are kept. Called from
+  // destroyGui() - see the note there.
+  void pruneClosedFdNotifiers();
 
   ClapSynth*            _synth  = nullptr;
   const clap_plugin_t*  _plugin = nullptr;
@@ -249,6 +272,11 @@ private:
   const clap_plugin_state_t*       _extState      = nullptr;
   const clap_plugin_timer_support_t*    _extTimer   = nullptr;
   const clap_plugin_posix_fd_support_t* _extPosixFd = nullptr;
+  const clap_plugin_note_ports_t*       _extNotePorts = nullptr;
+
+  // Negotiated in init() from the main input note port's supported_dialects.
+  // See wantsClapNoteDialect() above.
+  bool _useClapNoteDialect = true;
 
   clap_host_t _clapHost;
   std::atomic<bool> _curActiveState { false }; ///< touched from both the audio
