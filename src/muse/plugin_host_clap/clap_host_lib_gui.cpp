@@ -42,6 +42,26 @@
 
 #include "clap_host_lib.h"
 
+// TEMPORARY GUI LIFECYCLE TRACE - comment out the #define to silence.
+// Every message is prefixed "CLAPGUI:" so the whole lifecycle can be pulled out
+// of a MusE run with:  muse5 2>&1 | grep CLAPGUI
+// Uncomment to re-enable; every line is prefixed "CLAPGUI:" so a whole GUI
+// lifecycle can be pulled out of a run with:  muse5 2>&1 | grep CLAPGUI
+//#define CLAP_GUI_TRACE
+#ifdef CLAP_GUI_TRACE
+  #define CLAPGUI_TRACE(fmt, ...) \
+    fprintf(stderr, "CLAPGUI: " fmt "\n", ##__VA_ARGS__)
+  // core state, appended to most traces
+  #define CLAPGUI_STATE \
+    _isGuiCreated, _isGuiVisible, _isGuiFloating, (void*)_editorWindow, \
+    _editorWindow ? int(_editorWindow->isVisible()) : -1
+  #define CLAPGUI_STATE_FMT "created=%d visible=%d floating=%d win=%p winVisible=%d"
+#else
+  #define CLAPGUI_TRACE(fmt, ...) do {} while(0)
+  #define CLAPGUI_STATE 0
+  #define CLAPGUI_STATE_FMT "%d"
+#endif
+
 namespace MusECore {
 
 //---------------------------------------------------------
@@ -162,14 +182,27 @@ protected:
   {
     if(!_core)
     {
-      fprintf(stderr, "ClapEditorWindow::closeEvent: no core - just hiding\n");
+      CLAPGUI_TRACE("ClapEditorWindow::closeEvent - NO CORE, just hiding");
       QWidget::closeEvent(e);
       return;
     }
     // Accept first: _core may (via the GUI-closed callback) run MusE code that
     // ends up in destroyGui(), which deletes this widget - deferred through
     // deleteLater() precisely so we can still be inside our own event handler.
-    e->accept();
+    CLAPGUI_TRACE("ClapEditorWindow::closeEvent - WM close intercepted, core=%p xid=0x%lx",
+                  (void*)_core, (unsigned long)winId());
+
+    // IGNORE, do not accept. An ACCEPTED close event makes Qt run its full
+    // close machinery, which tears down this widget's PLATFORM window. The next
+    // show() then creates a brand-new X window with a new XID - and the
+    // plugin's embedded child window died together with the old one (X11
+    // destroys children with their parent), so the re-shown container is empty:
+    // the pure black window that only ever appeared on the WM-decoration close
+    // path. MusE's own GUI toggle never hit it because it only calls hide(),
+    // which leaves the native window intact.
+    // Ignoring the close leaves the native window alone; onEditorWindowClosed()
+    // then does the ordinary hide, byte-identical to MusE's toggle path.
+    e->ignore();
     _core->onEditorWindowClosed();
   }
 
@@ -185,6 +218,8 @@ private:
 
 void ClapInstanceCore::destroyGui()
 {
+  CLAPGUI_TRACE("destroyGui enter: " CLAPGUI_STATE_FMT, CLAPGUI_STATE);
+
   // WE MUST NOT CALL clearGuiEventSources() HERE!
   // In Linux X11, many CLAP plugins (e.g. u-he) open their X11 display
   // connection once per plugin instance, register the file descriptor,
@@ -227,6 +262,9 @@ void ClapInstanceCore::destroyGui()
     _editorWindow->deleteLater();
     _editorWindow = nullptr;
   }
+  _embedXid = 0;
+
+  CLAPGUI_TRACE("destroyGui leave: " CLAPGUI_STATE_FMT, CLAPGUI_STATE);
 }
 
 //---------------------------------------------------------
@@ -241,8 +279,11 @@ void ClapInstanceCore::destroyGui()
 
 void ClapInstanceCore::showNativeGui(bool v)
 {
+  CLAPGUI_TRACE("showNativeGui(%d) enter: " CLAPGUI_STATE_FMT, v, CLAPGUI_STATE);
+
   if(!_extGui || !_plugin)
   {
+    CLAPGUI_TRACE("showNativeGui(%d) leave: no gui extension / no plugin", v);
     #ifdef CLAP_DEBUG
     printf("ClapInstanceCore::showNativeGui: no GUI extension\n");
     #endif
@@ -251,6 +292,7 @@ void ClapInstanceCore::showNativeGui(bool v)
 
   if(v)
   {
+    const bool wasAlreadyCreated = _isGuiCreated;
     if(!_isGuiCreated)
     {
       const char* api =
@@ -339,6 +381,8 @@ void ClapInstanceCore::showNativeGui(bool v)
                 parented, (unsigned long)_editorWindow->winId());
         if(!parented)
           fprintf(stderr, "ClapInstanceCore::showNativeGui: set_parent() failed\n");
+        else
+          _embedXid = (unsigned long long)_editorWindow->winId();
 
         uint32_t w = 0, h = 0;
         const bool gotSize = _extGui->get_size(_plugin, &w, &h);
@@ -358,6 +402,36 @@ void ClapInstanceCore::showNativeGui(bool v)
     {
       if(_editorWindow)
       {
+        // Guard against Qt having swapped the platform window out from under us
+        // (see _embedXid in clap_host_lib.h). Re-parenting is far cheaper than a
+        // full destroy/create cycle and keeps the plugin's render surface.
+        if(!_isGuiFloating && _embedXid != 0
+           && (unsigned long long)_editorWindow->winId() != _embedXid)
+        {
+          fprintf(stderr, "ClapInstanceCore::showNativeGui: container XID changed "
+                          "0x%llx -> 0x%llx - re-parenting plugin GUI\n",
+                  _embedXid, (unsigned long long)_editorWindow->winId());
+          clap_window_t cw;
+          cw.api = CLAP_WINDOW_API_X11;
+#if defined(Q_OS_WIN)
+          cw.api = CLAP_WINDOW_API_WIN32;
+          cw.win32 = reinterpret_cast<clap_hwnd>(_editorWindow->winId());
+#elif defined(Q_OS_MACOS)
+          cw.api = CLAP_WINDOW_API_COCOA;
+          cw.cocoa = reinterpret_cast<clap_nsview>(_editorWindow->winId());
+#else
+          cw.x11 = static_cast<clap_xwnd>(_editorWindow->winId());
+#endif
+          if(_extGui->set_parent(_plugin, &cw))
+            _embedXid = (unsigned long long)_editorWindow->winId();
+          else
+            fprintf(stderr, "ClapInstanceCore::showNativeGui: re-parent failed - "
+                            "window will stay blank\n");
+        }
+
+        CLAPGUI_TRACE("showNativeGui(1): mapping container (reused=%d) xid=0x%llx embedXid=0x%llx",
+                      wasAlreadyCreated ? 1 : 0,
+                      (unsigned long long)_editorWindow->winId(), _embedXid);
         _editorWindow->show();
 
         // Force the X11 map request to actually land at the server before
@@ -379,9 +453,13 @@ void ClapInstanceCore::showNativeGui(bool v)
             _extGui->set_size(_plugin, w, h); // same size - nudges a redraw now that we're mapped
         }
       }
+      CLAPGUI_TRACE("showNativeGui(1): calling gui->show()");
       _extGui->show(_plugin);
       _isGuiVisible = true;
     }
+    else
+      CLAPGUI_TRACE("showNativeGui(1): already visible - NOTHING DONE "
+                    "(no map, no gui->show())");
   }
   else
   {
@@ -395,13 +473,19 @@ void ClapInstanceCore::showNativeGui(bool v)
     // done in closeNativeGui()/destroyGui() at actual close/shutdown.
     if(_isGuiVisible)
     {
+      CLAPGUI_TRACE("showNativeGui(0): calling gui->hide() + window hide()");
       if(_extGui && _plugin)
         _extGui->hide(_plugin);
       if(_editorWindow)
         _editorWindow->hide();
       _isGuiVisible = false;
     }
+    else
+      CLAPGUI_TRACE("showNativeGui(0): already hidden - NOTHING DONE "
+                    "(gui->hide() NOT called)");
   }
+
+  CLAPGUI_TRACE("showNativeGui(%d) leave: " CLAPGUI_STATE_FMT, v, CLAPGUI_STATE);
 }
 
 //---------------------------------------------------------
@@ -422,6 +506,9 @@ void ClapInstanceCore::closeNativeGui()
 
 void ClapInstanceCore::onEditorWindowClosed()
 {
+  CLAPGUI_TRACE("onEditorWindowClosed enter: " CLAPGUI_STATE_FMT " hiddenCb=%d",
+                CLAPGUI_STATE, _onGuiHiddenByPlugin ? 1 : 0);
+
   // Same path as MusE's own GUI toggle: this is what actually calls
   // _extGui->hide(_plugin), so the plugin's idea of "am I visible" stays in
   // sync with ours and its next show() really shows and repaints.
@@ -431,6 +518,11 @@ void ClapInstanceCore::onEditorWindowClosed()
   // click after a WM close is swallowed toggling a state that is already false.
   if(_onGuiHiddenByPlugin)
     _onGuiHiddenByPlugin();
+  else
+    CLAPGUI_TRACE("onEditorWindowClosed: no GUI-closed callback set - MusE will not "
+                  "learn the GUI closed (owner never called setGuiClosedCallback)");
+
+  CLAPGUI_TRACE("onEditorWindowClosed leave: " CLAPGUI_STATE_FMT, CLAPGUI_STATE);
 }
 
 //---------------------------------------------------------
@@ -440,6 +532,9 @@ void ClapInstanceCore::onEditorWindowClosed()
 
 void ClapInstanceCore::hostGuiClosed(bool was_destroyed)
 {
+  CLAPGUI_TRACE("hostGuiClosed(was_destroyed=%d): " CLAPGUI_STATE_FMT,
+                was_destroyed, CLAPGUI_STATE);
+
   #ifdef CLAP_DEBUG
   printf("ClapInstanceCore::hostGuiClosed was_destroyed:%d\n", was_destroyed);
   #endif
@@ -616,6 +711,7 @@ bool ClapInstanceCore::hostFdRegister(int fd, clap_posix_fd_flags_t flags)
                      [plug, ext, fd, f]() { ext->on_fd(plug, fd, f); });
     n->setEnabled(true);
     map.insert(fd, n);
+    CLAPGUI_TRACE("hostFdRegister: notifier created for fd=%d flags=0x%x", fd, (unsigned)flags);
   };
 
   make(_fdRead,  QSocketNotifier::Read,      CLAP_POSIX_FD_READ);

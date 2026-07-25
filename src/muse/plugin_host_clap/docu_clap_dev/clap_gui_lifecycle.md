@@ -76,26 +76,48 @@ Re-open takes §3.1's second half only (`_isGuiCreated` already true): map, nudg
 This is the path that produced a black window on re-open, and the reason for the
 interception.
 
-**Before:** Qt accepted the `QCloseEvent` and hid the widget. Nothing else ran —
-no `gui->hide()`, `_isGuiVisible` stayed `true`, MusE's flag stayed set. So the
-plugin still believed it was visible, and on re-open `gui->show()` became a no-op
-in the many plugins that early-return when already shown — which is also where
-they'd re-map and force a full repaint. Result: container maps, nothing paints.
-Secondary symptom: the first toggle click afterwards was swallowed toggling a
-flag that was already false, so re-opening took two clicks.
+This took three iterations. Recording all of it, because the two dead ends are
+easy to re-introduce.
 
-**Now:**
+**Stage 1 — no interception at all.** Qt accepted the `QCloseEvent` and hid the
+widget; nothing else ran. No `gui->hide()`, `_isGuiVisible` stayed `true`, MusE's
+flag stayed set, so the plugin still believed it was visible. Side effect: the
+first toggle click afterwards was swallowed toggling a flag that was already
+false, so re-opening took two clicks. Intercepting fixed that, but the window was
+still black.
+
+**Stage 2 — intercept, then `e->accept()`.** A trace of both paths showed the call
+sequences were *byte-identical*: same `gui->hide()`, same map, same `gui->show()`,
+same flags — and the WM path was still black. So the bug was never in our call
+sequence. The one remaining difference: accepting the close makes Qt run its full
+close machinery (`QWidgetPrivate::handleClose()`) on the container, and a
+programmatic `hide()` does not.
+
+**Stage 3 — `e->ignore()`.** Fixes it:
 
 ```
 WM sends WM_DELETE_WINDOW
   → ClapEditorWindow::closeEvent(e)
-       e->accept()                        ← accept first, see §5
-       core->onEditorWindowClosed()
+       e->ignore()                        ← Qt does NOT hide, NOT close, NOT touch
+       core->onEditorWindowClosed()          the native window
          ├─ showNativeGui(false)          ← same path as §3.2, so gui->hide() runs
          └─ _onGuiHiddenByPlugin()        ← MusE clears its toggle/pending flag
 ```
 
-Both close paths are now identical from the plugin's and MusE's point of view.
+Ignoring the close is the standard Qt idiom for "the X button hides, it does not
+destroy". Both paths are now identical in every respect. Verified on u-he Diva
+plus one other plugin.
+
+**What is still not understood.** The hypothesis behind stage 3 was that Qt's
+close path destroys the widget's *platform window*, so the next `show()` would
+create a new X window and orphan the plugin's embedded child. That is **not** what
+happens: the trace prints the container XID on every re-open and it is stable
+across WM closes (`xid == embedXid` every time), and the re-parent guard in §3.7
+never fires. Qt keeps the same X window; what exactly its close machinery does to
+break the embedded child is unidentified. The fix is empirical. Consequence: do
+not "simplify" `e->ignore()` back to `e->accept()` on the grounds that the XID is
+stable — the stable XID is what *disproves* the tidy explanation, not what makes
+accept safe.
 
 ### 3.4 Plugin-initiated close — `hostGuiClosed(was_destroyed)`
 
@@ -125,11 +147,22 @@ closeNativeGui() / shutdown()
 `shutdown()` additionally calls `clearGuiEventSources()`; `destroyGui()` alone
 deliberately does **not** (see §4.2).
 
+### 3.7 Re-parent guard on re-show
+
+Before re-mapping a *reused* container, `showNativeGui(true)` compares
+`_editorWindow->winId()` with `_embedXid` (the XID last handed to `set_parent()`).
+On a mismatch it logs and calls `set_parent()` again instead of showing an empty
+window. It has never fired in practice (§3.3) — cheap insurance against Qt or a WM
+swapping the native window, and re-parenting is far cheaper than a destroy/create
+cycle since it keeps the plugin's render surface.
+
 ## 4. The event-source problem (the other black window)
 
 Plugins drive their GUI event loop through host-registered sources:
 `clap_host_timer_support` → `QTimer`, `clap_host_posix_fd_support` → `QSocketNotifier`
-on the plugin's X11 display fd. If those stop firing, the plugin never processes
+on the plugin's X11 display fd. Which of the two a plugin uses varies — observed
+in practice: Diva registers both a timer and an fd, while another plugin
+registered only timer id 0 and no fd at all. Both must work. If those stop firing, the plugin never processes
 Expose/ConfigureNotify and its window stays unpainted — mapped, no crash, just
 black.
 
@@ -183,11 +216,22 @@ use-after-free. `destroyGui()` now does `hide()` + `deleteLater()`:
 - `hide()` so no empty frame lingers until the event loop spins,
 - `deleteLater()` so the object outlives its own event handler.
 
-`closeEvent()` calls `e->accept()` *before* `onEditorWindowClosed()` for the same
+`closeEvent()` calls `e->ignore()` *before* `onEditorWindowClosed()` for the same
 reason: the event must be settled before anything downstream can tear the widget
 down.
 
 ## 6. Diagnostics
+
+`clap_host_lib_gui.cpp` carries a lifecycle trace, **off by default**. Re-enable by
+uncommenting `#define CLAP_GUI_TRACE` near the top, then:
+
+```
+muse5 2>&1 | grep -E "CLAPGUI|QSocketNotifier|BadWindow|BadDrawable"
+```
+
+It prints entry/leave plus the state tuple
+(`created / visible / floating / win / winVisible`, and the XIDs on show) for every
+path in §3. That trace is what disproved the stage-2 theory in §3.3 — keep it.
 
 Expected on stderr, all benign:
 
@@ -219,10 +263,17 @@ per-instance-display plugin such as a u-he, and one JUCE/clap-wrapper plugin):
 6. Delete the track / remove the effect while the GUI is open.
 7. Quit with the GUI open.
 
-## 8. Known remaining item
+## 8. Known remaining items
 
-If a plugin still comes back black on the WM path, the `gui->show()`-is-a-no-op
-theory is confirmed for it, and the fallback is to destroy rather than hide in
-`onEditorWindowClosed()` (i.e. call `closeNativeGui()`). That is now reliable
-thanks to §4, but it is the more expensive behaviour — full surface recreate on
-every re-open — so hiding stays the default.
+- **The stage-3 mechanism is unexplained** (§3.3). Read that section before
+  touching `ClapEditorWindow::closeEvent()`.
+- **`Failed to set the xembed property property: BadAtom`** — Diva emits this while
+  embedding: it is the plugin trying to set `_XEMBED_INFO` and failing to intern
+  the atom. Harmless here (Diva falls back to `xcb_copy_area()` with shared
+  pixmaps and paints fine), but MusE does not implement the XEmbed protocol at
+  all. A plugin that genuinely requires XEmbed would not paint, and this message
+  is where that would surface first.
+- **Fallback if some plugin is still black on the WM path**: destroy instead of
+  hide, i.e. call `closeNativeGui()` from `onEditorWindowClosed()`. Reliable
+  thanks to §4, but more expensive — full surface recreate on every re-open — so
+  hiding stays the default.

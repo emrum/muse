@@ -372,6 +372,12 @@ private:
   bool _isGuiVisible  = false;
   bool _isGuiFloating = false;
   QWidget* _editorWindow = nullptr;
+  // Native window id last handed to gui->set_parent(). Qt can replace a
+  // widget's platform window behind our back (notably when a close event is
+  // ACCEPTED - see ClapEditorWindow::closeEvent), which orphans the plugin's
+  // embedded child and leaves a black container. Compared on every show so we
+  // can re-parent instead of silently showing an empty window. 0 = not embedded.
+  unsigned long long _embedXid = 0;
   GuiClosedCallback _onGuiHiddenByPlugin; ///< see setGuiClosedCallback()
 
   clap_id                                _nextTimerId = 0;
