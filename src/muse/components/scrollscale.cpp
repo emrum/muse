@@ -3,7 +3,7 @@
 //  Linux Music Editor
 //    $Id: scrollscale.cpp,v 1.2.2.2 2009/11/04 17:43:25 lunar_shuttle Exp $
 //  (C) Copyright 1999 Werner Schweer (ws@seh.de)
-//
+// 
 //  This program is free software; you can redistribute it and/or
 //  modify it under the terms of the GNU General Public License
 //  as published by the Free Software Foundation; version 2 of
@@ -31,11 +31,19 @@
 #include <QToolButton>
 #include <QToolTip>
 #include <QStyle>
+#include <QTimer>
 
 #include "scrollscale.h"
 #include "icons.h"
 
 namespace MusEGui {
+
+// Ceiling on how often the scrollChanged() cascade runs while the handle is being
+//  dragged, in milliseconds. Matches the wheel-scroll animation's frame cap
+//  (WHEEL_SCROLL_ANIM_FPS in canvas.cpp) - the canvas repaint is the expensive
+//  part either way. Tune here if a machine can afford more.
+#define SCROLL_DRAG_THROTTLE_MS 33
+
 
 
 //---------------------------------------------------------
@@ -56,11 +64,23 @@ void ScrollScale::setScale ( int val, int pos_offset )
 {
 	int off = offset();
 	int old_scale_val = scaleVal;
+	const int old_scroll_val = scroll->value();
 
 	scaleVal = mag2scale(val);
 
 	//fprintf(stderr, "scaleMin %d scaleMax %d val=%d emit scaleVal=%d\n", scaleMin, scaleMax, val, scaleVal);
 	emit scaleChanged ( scaleVal );
+
+	// The position is recomputed for the new scale below and applied at the end -
+	//  that value is the authoritative one for this zoom step. So keep the whole
+	//  block silent: setRange() also clamps the scrollbar to the new maximum and
+	//  would emit an intermediate scrollChanged() with a clamped value (0 whenever
+	//  the new maximum collapses), which whoever follows us applies immediately and
+	//  which then fights the real value. One signal at the end instead of two or
+	//  three - this is what made the view jump to position 0 while the zoom slider
+	//  was being dragged.
+	scroll->blockSignals ( true );
+
 	if ( !noScale )
 		setRange ( minVal, maxVal );
 
@@ -93,7 +113,19 @@ void ScrollScale::setScale ( int val, int pos_offset )
 	
 	if(pos > pmax)
 		pos = pmax;
-	setPos(pos);
+	// pmax is negative when the view is wider than the content, and zoom-at-cursor
+	//  can push pos below zero too. setPos() takes an unsigned, so a negative pos
+	//  used to wrap to a huge value and slam the scrollbar to its maximum.
+	if(pos < 0)
+		pos = 0;
+
+	setPos ( pos );
+	scroll->blockSignals ( false );
+
+	// The one authoritative notification for this zoom step. scroll->value() rather
+	//  than pos: the scrollbar has clamped it to the new range.
+	if ( scroll->value() != old_scroll_val )
+		emit scrollChanged ( scroll->value() );
 }
 
 //---------------------------------------------------------
@@ -155,6 +187,79 @@ void ScrollScale::setRange ( int min, int max )
 }
 
 //---------------------------------------------------------
+//   scrollValueChanged
+//   Everything that follows scrollChanged() - the canvas repaint above all -
+//   runs synchronously, on the thread that also has to repaint this widget.
+//   Mice report at 125 Hz and up, so forwarding every single drag step starves
+//   our own paint event and the handle lags behind the cursor.
+//   Leading edge goes through immediately (no added latency on the first step),
+//   further steps inside the window are held back with only the newest value
+//   kept, and scrollThrottleTick() flushes it. A value is never dropped, so the
+//   view can never end up somewhere other than where the handle is.
+//   Only handle drags are limited. Programmatic moves (setPos(), setOffset(),
+//   playback follow, autoscroll) and clicks/wheel/keys on the scrollbar are
+//   forwarded at once as before.
+//---------------------------------------------------------
+
+void ScrollScale::scrollValueChanged ( int val )
+{
+	if ( !scroll->isSliderDown() )
+	{
+		_pendingScrollVal = -1;
+		emit scrollChanged ( val );
+		return;
+	}
+
+	_pendingScrollVal = val;
+
+	if ( _scrollThrottleTimer->isActive() )
+		return;                            // inside the window - newest value wins
+
+	_pendingScrollVal = -1;
+	_scrollThrottleTimer->start ( SCROLL_DRAG_THROTTLE_MS );
+	emit scrollChanged ( val );
+}
+
+//---------------------------------------------------------
+//   scrollThrottleTick
+//---------------------------------------------------------
+
+void ScrollScale::scrollThrottleTick()
+{
+	if ( _pendingScrollVal < 0 )
+		return;                            // burst over, let the window close
+
+	emitPendingScroll();
+	_scrollThrottleTimer->start ( SCROLL_DRAG_THROTTLE_MS );
+}
+
+//---------------------------------------------------------
+//   scrollSliderReleased
+//   Flush at once so the view ends up exactly where the handle was let go,
+//   instead of up to SCROLL_DRAG_THROTTLE_MS short of it.
+//---------------------------------------------------------
+
+void ScrollScale::scrollSliderReleased()
+{
+	_scrollThrottleTimer->stop();
+	emitPendingScroll();
+}
+
+//---------------------------------------------------------
+//   emitPendingScroll
+//---------------------------------------------------------
+
+void ScrollScale::emitPendingScroll()
+{
+	if ( _pendingScrollVal < 0 )
+		return;
+
+	const int val = _pendingScrollVal;
+	_pendingScrollVal = -1;
+	emit scrollChanged ( val );
+}
+
+//---------------------------------------------------------
 //   setPos
 //    pos in pixel
 //---------------------------------------------------------
@@ -162,6 +267,17 @@ void ScrollScale::setRange ( int min, int max )
 void ScrollScale::setPos ( unsigned pos )
 {
 	scroll->setValue ( pos );
+}
+
+//---------------------------------------------------------
+//   setPosSilent
+//---------------------------------------------------------
+
+void ScrollScale::setPosSilent ( unsigned pos )
+{
+	scroll->blockSignals(true);
+	scroll->setValue ( pos );
+	scroll->blockSignals(false);
 }
 
 //---------------------------------------------------------
@@ -212,6 +328,7 @@ ScrollScale::ScrollScale ( int s1, int s2, int cs, int max_, Qt::Orientation o,
 	logbase     = bas;
 	invers      = inv;
 	scaleVal    = 0;
+	_pendingScrollVal = -1;
 
 	scaleVal = cs;
 	const int cur = scale2mag(cs);
@@ -219,6 +336,7 @@ ScrollScale::ScrollScale ( int s1, int s2, int cs, int max_, Qt::Orientation o,
 	//fprintf(stderr, "ScrollScale: cs:%d cur:%f\n", cs, cur);
 	scale  = new QSlider (o);
     scale->setObjectName("ScrollScaleZoomSlider");
+    scale->setOrientation( o );
 	// Added by Tim. For some reason focus was on. 
 	// It messes up tabbing, and really should have a shortcut instead.
 	scale->setFocusPolicy(Qt::NoFocus);  
@@ -228,6 +346,7 @@ ScrollScale::ScrollScale ( int s1, int s2, int cs, int max_, Qt::Orientation o,
 	scale->setValue(cur);	
 
 	scroll = new QScrollBar ( o );
+  scroll->setOrientation( o );
 	//scroll->setFocusPolicy(Qt::NoFocus);  // Tim.
 
 	emit scaleChanged ( scaleVal );
@@ -273,7 +392,21 @@ ScrollScale::ScrollScale ( int s1, int s2, int cs, int max_, Qt::Orientation o,
 
     setLayout(box);
 	connect ( scale, SIGNAL ( valueChanged ( int ) ), SLOT ( setScale ( int ) ) );
-	connect ( scroll, SIGNAL ( valueChanged ( int ) ), SIGNAL ( scrollChanged ( int ) ) );
+
+	_scrollThrottleTimer = new QTimer ( this );
+	_scrollThrottleTimer->setSingleShot ( true );
+	_scrollThrottleTimer->setTimerType ( Qt::PreciseTimer );
+	connect ( _scrollThrottleTimer, &QTimer::timeout, this, &ScrollScale::scrollThrottleTick );
+	// NOT a direct valueChanged -> scrollChanged forward any more: while the handle
+	//  is dragged the cascade must be rate limited, see scrollValueChanged().
+	connect ( scroll, &QScrollBar::valueChanged,   this, &ScrollScale::scrollValueChanged );
+	connect ( scroll, &QScrollBar::sliderReleased, this, &ScrollScale::scrollSliderReleased );
+
+	// Let whoever follows us know that the zoom slider is being dragged, so that
+	//  animated scrolling can be suspended for the duration - the pixel mapping
+	//  changes on every step of the drag, which no position animation can track.
+	connect ( scale, &QSlider::sliderPressed,  this, [this](){ emit scaleDragStateChanged ( true ); } );
+	connect ( scale, &QSlider::sliderReleased, this, [this](){ emit scaleDragStateChanged ( false ); } );
 }
 
 //---------------------------------------------------------

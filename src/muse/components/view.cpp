@@ -39,11 +39,15 @@
 #include <QPainter>
 #include <QResizeEvent>
 
-// Don't use this, it was just for debugging. 
+// Don't use this, it was just for debugging.
 // It's much slower than muse-1 no matter how hard I tried.
-// The left/right pixmap shifters in seXPos setYPos 
+// The left/right pixmap shifters in setXPos/setYPos
 //  just ate up all the time no matter what I tried.
-//#defines VIEW_USE_DOUBLE_BUFFERING 1
+// NOTE: was written "//#defines" (with an s), so uncommenting it would not have
+//  defined anything. The #ifdef VIEW_USE_DOUBLE_BUFFERING branches below have
+//  therefore never been compiled and are untested - the live path is the #else
+//  one, using QWidget::scroll() plus a partial update().
+//#define VIEW_USE_DOUBLE_BUFFERING 1
 
 namespace MusEGui {
 

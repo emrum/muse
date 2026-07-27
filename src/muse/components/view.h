@@ -199,6 +199,39 @@ class View : public QWidget {
       virtual void viewMouseReleaseEvent(QMouseEvent*) {}
       virtual void viewDropEvent(QDropEvent*) {}
 
+      //-----------------------------------------------------------------
+      // Coordinate systems
+      //
+      // Everything here converts between two spaces:
+      //
+      //   VIRTUAL - the content's own units. Ticks in the arranger and the midi
+      //             editors, sample frames in the wave editor. This is what
+      //             CItem::bbox() holds and what the item maps are keyed by.
+      //   DEVICE  - pixels inside this widget, i.e. what a QPaintEvent and a
+      //             QMouseEvent give you.
+      //
+      // xmag/ymag carry the zoom, with a sign convention that trips people up:
+      //   xmag > 0 : zoomed IN  - xmag pixels per virtual unit
+      //   xmag < 0 : zoomed OUT - (-xmag) virtual units per pixel
+      // (Note mapx() tests 'xmag < 0' while mapxDev() tests 'xmag <= 0'; at
+      //  xmag == 0 both degenerate, so a zero magnification is not a valid state.)
+      //
+      // xpos/ypos are the scroll position and xorg/yorg the origin, BOTH IN
+      // PIXELS - map() subtracts (xpos + xorg) only after scaling.
+      //
+      // Which function to use:
+      //   map*()      virtual -> device, POSITION  (applies the scroll offset)
+      //   map*Dev()   device  -> virtual, POSITION (applies it in reverse)
+      //   rmap*()     virtual -> device, DISTANCE  (scale only, no offset)
+      //   rmap*Dev()  device  -> virtual, DISTANCE (scale only, no offset)
+      //
+      // So positions go through map/mapDev and widths, heights and deltas go
+      // through rmap/rmapDev. Using a position function on a distance silently
+      // adds the scroll offset to it, which is the classic bug in this code.
+      // mapxDev() also clamps its result at 0, so it cannot be used to ask about
+      // content to the left of the origin.
+      //-----------------------------------------------------------------
+
       QRect map(const QRect&) const;
       QPoint map(const QPoint&) const;
       void map(const QRegion& rg_in, QRegion& rg_out) const;
@@ -235,6 +268,17 @@ class View : public QWidget {
       }  
 
    public slots:
+      // NOTE: Deliberately NOT virtual. Canvas re-declares these as slots of its
+      //  own and thereby hides them, to cancel a running wheel-scroll animation
+      //  whenever the position or zoom is driven from outside (see
+      //  Canvas::setXPos()). Qt resolves SLOT("setXPos(int)") in the receiver's
+      //  own metaobject first, so the Canvas version is what the scrollbars and
+      //  zoom bars reach, and no call site here uses a MusEGui::View* pointer.
+      //  Making them virtual would insert four entries into View's vtable and
+      //  shift every Canvas virtual after it - any translation unit that misses
+      //  the rebuild then calls the wrong function through the vtable (that
+      //  showed up as PartCanvas::updateItems() landing in
+      //  PartCanvas::keyRelease() instead of Canvas::cancelMouseOps()).
       void setXPos(int);
       void setYPos(int);
       void setXMag(int xs);
@@ -253,6 +297,15 @@ class View : public QWidget {
       int getXScale() const    { return xmag; }
       int getYScale() const    { return ymag; }
       void setOrigin(int x, int y);
+      // Selects how the virtual->device mapping is applied when drawing.
+      //   true  - this class does it by hand, with map()/mapDev() and friends. Item
+      //           bounding boxes stay in virtual units. The arranger, the piano roll
+      //           and the wave editor work this way.
+      //   false - the transform is carried by the QPainter instead (see
+      //           View::setPainter() and the corresponding branch in
+      //           Canvas::draw()). The drum editor's canvas is the only user -
+      //           dcanvas.cpp is the sole setVirt(false) call in the tree.
+      // Anything reading item coordinates has to know which of the two it is in.
       void setVirt(bool flag)  { _virt = flag; }
       bool virt() const        { return _virt; }
       QRect rmap(const QRect&) const;

@@ -35,6 +35,7 @@
 #include <QRegion>
 #include <QRect>
 #include <QUuid>
+#include <QElapsedTimer>
 
 
 // Forward declarations:
@@ -50,6 +51,25 @@ class Undo;
 }
 
 namespace MusEGui {
+
+//---------------------------------------------------------
+//   WheelScrollAnimState
+//   State for one axis of the wheel-scroll animation (see
+//   Canvas::smoothScrollBy() in canvas.cpp). Driven by a manually-started
+//   QTimer at a fixed, capped rate (WHEEL_SCROLL_ANIM_FPS in canvas.cpp)
+//   rather than QVariantAnimation's ~60fps internal driver - Canvas::draw()'s
+//   item lookup is X-only, not Y-aware, so a vertical scroll's per-frame
+//   repaint cost doesn't shrink with a smaller step; capping the tick rate
+//   directly caps how often that cost is paid during one scroll gesture.
+//---------------------------------------------------------
+
+struct WheelScrollAnimState {
+      QTimer* timer = nullptr;
+      QElapsedTimer elapsed;
+      double startVal = 0.0;
+      double endVal = 0.0;
+      int durationMs = 0;
+      };
 
 //---------------------------------------------------------
 //   Canvas
@@ -106,6 +126,27 @@ class Canvas : public View {
       bool canScrollUp;
       bool canScrollDown;
 
+      // Eased wheel-scroll animations (see wheelEvent()/smoothScrollBy()).
+      // Rather than jumping straight to the target position on every wheel
+      // event, each axis animates towards it over a short duration.
+      WheelScrollAnimState _hWheelAnim;
+      WheelScrollAnimState _vWheelAnim;
+      // While true, smoothScrollBy() applies its delta immediately instead of
+      //  animating. Set while a zoom (scale) slider is being dragged - a zoom
+      //  changes the pixel mapping the animation's start/end values were computed
+      //  in, so animating across it is meaningless. See setScrollAnimBlocked().
+      bool _scrollAnimBlocked = false;
+
+      // The canvas contents. CItemMap is a std::multimap keyed by the item's LEFT
+      //  edge in VIRTUAL coordinates - CItemMap::add() uses item->bbox().x() (see
+      //  citem.cpp). Multi- because several items can start at the same position.
+      // Consequence for drawing and hit testing: the key tells you where an item
+      //  BEGINS, never where it ends, so a range query cannot simply start at the
+      //  left edge of the area of interest - an item starting far to the left may
+      //  still reach into it. upper_bound() bounds the right side exactly; the left
+      //  side needs a conservative slack instead. See ux_lolim in Canvas::draw().
+      // 'moving' holds the items currently being dragged, so that they can be drawn
+      //  differently at their original position while the drag is in progress.
       CItemMap items;
       CItemMap moving;
       CItem* newCItem;
@@ -146,6 +187,14 @@ class Canvas : public View {
       virtual void viewMouseReleaseEvent(QMouseEvent*);
       virtual void draw(QPainter& p, const QRect& mr, const QRegion& mrg = QRegion());
       virtual void wheelEvent(QWheelEvent* e);
+      void smoothScrollBy(WheelScrollAnimState& anim, int delta, bool horizontal);
+      void wheelScrollAnimStep(WheelScrollAnimState& anim, bool horizontal);
+      void hWheelScrollTick();
+      void vWheelScrollTick();
+      // Stops 'anim' and forgets its start/end values. Anything that changes the
+      //  position or the zoom from outside the animation must call this, otherwise
+      //  the next tick overwrites that new position with a stale interpolated one.
+      void stopWheelScrollAnim(WheelScrollAnimState& anim);
 
       virtual void keyPress(QKeyEvent*);
       virtual void keyRelease(QKeyEvent*);
@@ -246,12 +295,37 @@ class Canvas : public View {
       virtual void setPos(int, unsigned, bool adjustScrollbar);
       void scrollTimerDone(void);
       void redirectedWheelEvent(QWheelEvent*);
+      // Any externally driven position or zoom change wins over a running
+      //  wheel-scroll animation, so these cancel it first (scrollbar moved, zoom
+      //  bar dragged, programmatic jump, follow-playback, ...).
+      // These HIDE the equally-named View slots rather than overriding them -
+      //  View's are intentionally non-virtual, see the note there. Every caller
+      //  either goes through the meta-object (scrollbars, zoom bars) or has a
+      //  Canvas-or-derived static type, so all of them land here.
+      void setXPos(int x);
+      void setYPos(int y);
+      void setXMag(int xs);
+      void setYMag(int ys);
+      // Connect to ScrollScale::scaleDragStateChanged(). While a zoom slider is
+      //  held down, no scroll animation is started and a running one is finished
+      //  immediately, so the zoom bar's own position handling doesn't fight it.
+      void setScrollAnimBlocked(bool block);
 
    signals:
       void followEvent(int);
       void toolChanged(int);
       void verticalScroll(unsigned);
       void horizontalScroll(unsigned);
+      // Emitted on every intermediate frame of the smooth wheel-scroll
+      // animation (see Canvas::smoothScrollBy()). The canvas has already
+      // positioned itself when these fire; everything that must stay visually
+      // locked to it - track list, time ruler, and the scrollbar handle itself -
+      // should follow these, moving the scrollbar SILENTLY so the cascade does
+      // not come back in and cancel the animation driving it.
+      // verticalScroll()/horizontalScroll() above are a different thing: they
+      // mean "move the view here" and the animation does not use them at all.
+      void verticalScrollAnimated(unsigned);
+      void horizontalScrollAnimated(unsigned);
       void horizontalScrollNoLimit(unsigned);
       void horizontalZoom(bool zoom_in, const QPoint& glob_pos);
       void horizontalZoom(int mag, const QPoint& glob_pos);

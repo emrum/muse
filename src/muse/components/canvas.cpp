@@ -29,6 +29,8 @@
 #include <QApplication>
 #include <QCursor>
 #include <QScreen>
+#include <QTimer>
+#include <QEasingCurve>
 // Qt6: QDesktopWidget was removed; QScreen (above) is the modern replacement
 //  for screen-geometry queries.
 
@@ -337,7 +339,21 @@ void Canvas::draw(QPainter& p, const QRect& mr, const QRegion& mrg)
       //  part canvas want to draw a two-pixel wide border which for an item at position x=0
       //  actually begins at x=-1 and needs to include that small adjustment during updates...
       ux_2lim += rmapxDev(1);
-      
+
+      // Left limit of the damaged area, in the same (virtual/tick) coordinates the
+      //  item map is keyed in. The map is keyed by each item's LEFT edge, so the
+      //  iteration below cannot simply start at the damaged area: an item beginning
+      //  far to the left may still extend into it. But it can reject those that end
+      //  before it, and it must - otherwise every paint calls drawItem() once for
+      //  every item between the start of the song and the damaged area, however
+      //  narrow that area is. That cost grows the further right the view is scrolled
+      //  and is paid on every single scroll step, which is what made dragging a
+      //  scrollbar handle lag behind the mouse (the wheel animation hides it, being
+      //  capped at WHEEL_SCROLL_ANIM_FPS).
+      // Two pixels of slack: drawItem() compares against the item's bounding box
+      //  expanded by one pixel on each side, so stay conservative here.
+      const int ux_lolim = mapxDev(mx) - rmapxDev(2);
+
       std::vector<CItem*> list1;
       std::vector<CItem*> list2;
       std::vector<CItem*> list4;
@@ -364,6 +380,11 @@ void Canvas::draw(QPainter& p, const QRect& mr, const QRegion& mrg)
             for(iCItem i = items.begin(); i != to; ++i, ++ii)
             { 
               CItem* ci = i->second;
+
+              // Ends left of the damaged area - cannot contribute anything to it.
+              const QRect& ci_bb = ci->bbox();
+              if(ci_bb.x() + ci_bb.width() < ux_lolim)
+                continue;
               // NOTE Optimization: For each item call this once now, then use cached results later via cachedHasHiddenEvents().
               // Not required for now.
               //ci->part()->hasHiddenEvents();
@@ -406,8 +427,13 @@ void Canvas::draw(QPainter& p, const QRect& mr, const QRegion& mrg)
             
             // Draw items being moved, a special way in their original location.
             to = moving.lower_bound(ux_2lim);
-            for (iCItem i = moving.begin(); i != to; ++i) 
-                  drawItem(p, i->second, mr, mrg);
+            for (iCItem i = moving.begin(); i != to; ++i)
+            {
+              const QRect& mv_bb = i->second->bbox();
+              if(mv_bb.x() + mv_bb.width() < ux_lolim)
+                continue;
+              drawItem(p, i->second, mr, mrg);
+            }
 
             // Draw special top item for new recordings etc.
             drawTopItem(p,mr, mrg);
@@ -578,6 +604,15 @@ void Canvas::draw(QPainter& p, const QRect& mr, const QRegion& mrg)
 #define WHEEL_STEPSIZE 50
 //#define WHEEL_DELTA   120
 
+// Wheel-scroll animation (see smoothScrollBy()) timing. Duration scales
+// with distance: WHEEL_SCROLL_ANIM_REFERENCE_DISTANCE_PX of movement gets
+// the full WHEEL_SCROLL_ANIM_MAX_DURATION_MS; shorter distances (e.g. the
+// small remaining step when extending an in-progress animation) get
+// proportionally less time, down to WHEEL_SCROLL_ANIM_MIN_DURATION_MS.
+#define WHEEL_SCROLL_ANIM_MAX_DURATION_MS 600
+#define WHEEL_SCROLL_ANIM_MIN_DURATION_MS 160
+#define WHEEL_SCROLL_ANIM_REFERENCE_DISTANCE_PX 30.0
+
 //---------------------------------------------------------
 //   wheelEvent
 //---------------------------------------------------------
@@ -637,14 +672,8 @@ void Canvas::wheelEvent(QWheelEvent* ev)
         }
         int scrollstep = wheel_step_sz * (scrolldelta);
         scrollstep = scrollstep / 10;
-        int newXpos = xpos + xpixelscale * scrollstep;
 
-        if (newXpos < 0) {
-          newXpos = 0;
-        }
-
-        emit horizontalScroll((unsigned)newXpos);
-
+        smoothScrollBy(_hWheelAnim, xpixelscale * scrollstep, true);
     }
 
     if (!shift && delta.y() != 0) { // scroll vertically
@@ -657,14 +686,238 @@ void Canvas::wheelEvent(QWheelEvent* ev)
 
         int scrollstep = wheel_step_sz * (-scrolldelta);
         scrollstep = scrollstep / 2;
-        int newYpos = ypos + ypixelscale * scrollstep;
 
-        if (newYpos < 0)
-              newYpos = 0;
-
-        emit verticalScroll((unsigned)newYpos);
+        smoothScrollBy(_vWheelAnim, ypixelscale * scrollstep, false);
     }
 }
+
+// Frame rate cap for the wheel-scroll animation. QVariantAnimation (used
+// previously) ties to Qt's internal ~60fps animation driver, which isn't
+// directly throttleable per instance; a manually-driven QTimer lets us
+// pick a lower, fixed rate instead.
+// Canvas::draw()'s item lookup is bounded in X but not in Y, so a vertical
+// scroll's per-frame repaint still visits every item in the visible X range
+// however small the step is. Capping the tick rate caps how often that is
+// paid during one scroll gesture, at some cost to visual smoothness.
+// (It used to be far worse: draw() had no LEFT X bound either and visited
+// every item from the start of the song on every single repaint. See
+// ux_lolim in Canvas::draw().)
+#define WHEEL_SCROLL_ANIM_FPS 30
+#define WHEEL_SCROLL_ANIM_INTERVAL_MS (1000 / WHEEL_SCROLL_ANIM_FPS)
+
+//---------------------------------------------------------
+//   smoothScrollBy
+//   Animates horizontalScroll()/verticalScroll() towards
+//   (current settled position + delta), easing out, instead of jumping
+//   there instantly. If an animation for this axis is already running
+//   (e.g. the user keeps turning the wheel before the previous step
+//   finished), the new delta extends that animation's target rather than
+//   restarting from the settled position, so a burst of wheel events still
+//   feels continuous rather than stuttering between separate short
+//   animations.
+//   The animation's duration scales with how much distance this
+//   particular (re)start actually has to cover - NOT always the full
+//   WHEEL_SCROLL_ANIM_MAX_DURATION_MS. A burst of wheel events typically
+//   only extends the target by a little each time; stretching that small
+//   remaining distance across a full-length duration made most
+//   consecutive frames round to the same integer pixel value, which
+//   looked like the animation stalling partway through. Scaling duration
+//   to distance keeps the perceived speed roughly constant instead.
+//   'anim' is one of Canvas::_hWheelAnim/_vWheelAnim. 'horizontal' selects
+//   which of horizontalScroll()/verticalScroll() the animation drives.
+//---------------------------------------------------------
+void Canvas::smoothScrollBy(WheelScrollAnimState& anim, int delta, bool horizontal)
+{
+    if (delta == 0)
+      return;
+
+    // A zoom slider is being dragged: the pixel mapping is changing under us, so
+    //  animating between two pixel positions computed in different scales would
+    //  send the canvas somewhere unrelated (typically back towards 0). Apply the
+    //  step immediately instead and let the animation resume on mouse release.
+    if (_scrollAnimBlocked) {
+      stopWheelScrollAnim(anim);
+      const double settled = horizontal ? xpos : ypos;
+      int target = qRound(settled + delta);
+      if (target < 0)
+        target = 0;
+      if (horizontal) {
+        setXPos(target);
+        emit horizontalScrollAnimated((unsigned)target);
+      }
+      else {
+        setYPos(target);
+        emit verticalScrollAnimated((unsigned)target);
+      }
+      return;
+    }
+
+    const bool wasRunning = anim.timer && anim.timer->isActive();
+
+    const double settledPos = horizontal ? xpos : ypos;
+    double startVal;
+    double baseTarget;
+    if (wasRunning) {
+      // Snapshot the animation's current interpolated value before
+      // retargeting it, so extending mid-flight doesn't jump - same idea
+      // as before, just computed manually now instead of via
+      // QVariantAnimation::currentValue()/endValue().
+      const double progress = anim.durationMs > 0
+            ? qBound(0.0, (double)anim.elapsed.elapsed() / anim.durationMs, 1.0)
+            : 1.0;
+      const double eased = QEasingCurve(QEasingCurve::OutCubic).valueForProgress(progress);
+      startVal   = anim.startVal + (anim.endVal - anim.startVal) * eased;
+      baseTarget = anim.endVal;
+    }
+    else {
+      startVal   = settledPos;
+      baseTarget = settledPos;
+    }
+
+    double target = baseTarget + delta;
+    if (target < 0.0)
+      target = 0.0;
+
+    // NOTE: Do NOT move the scrollbar to the eventual target here. It used to be
+    //  done for efficiency, but it leaves the handle showing a position the canvas
+    //  has not reached yet (and never reaches at all if the animation gets
+    //  cancelled). Grabbing the handle then starts the drag from that stale value
+    //  and the view jumps. The scrollbar now follows the animation frame by frame
+    //  instead, silently, via the *ScrollAnimated signals - it is only a position
+    //  indicator, so its own repaint is all that per-frame costs.
+
+    const double distance = qAbs(target - startVal);
+    // Duration proportional to distance, capped at the requested "full"
+    // duration for a typical single wheel step, and floored so even a
+    // tiny leftover distance still animates (rather than reducing to
+    // ~0ms and effectively becoming an instant jump again).
+    int duration = qRound(WHEEL_SCROLL_ANIM_MAX_DURATION_MS
+                           * (distance / WHEEL_SCROLL_ANIM_REFERENCE_DISTANCE_PX));
+    duration = qBound(WHEEL_SCROLL_ANIM_MIN_DURATION_MS, duration, WHEEL_SCROLL_ANIM_MAX_DURATION_MS);
+
+    anim.startVal   = startVal;
+    anim.endVal     = target;
+    anim.durationMs = duration;
+    anim.elapsed.restart();
+
+    if (!anim.timer) {
+      anim.timer = new QTimer(this);
+      anim.timer->setTimerType(Qt::PreciseTimer);
+      if (horizontal)
+        connect(anim.timer, &QTimer::timeout, this, &Canvas::hWheelScrollTick);
+      else
+        connect(anim.timer, &QTimer::timeout, this, &Canvas::vWheelScrollTick);
+    }
+    anim.timer->start(WHEEL_SCROLL_ANIM_INTERVAL_MS);
+}
+
+//---------------------------------------------------------
+//   wheelScrollAnimStep
+//   One tick of the wheel-scroll animation for one axis: computes the
+//   eased position for how far along 'anim' currently is, applies it to
+//   the canvas directly (setXPos()/setYPos(), no signal round-trip
+//   needed for that), and emits *ScrollAnimated for anything else that
+//   must track the animation (e.g. the arranger's track list). Stops
+//   'anim's timer once the duration has fully elapsed.
+//---------------------------------------------------------
+void Canvas::wheelScrollAnimStep(WheelScrollAnimState& anim, bool horizontal)
+{
+    const double progress = anim.durationMs > 0
+          ? qBound(0.0, (double)anim.elapsed.elapsed() / anim.durationMs, 1.0)
+          : 1.0;
+    const double eased = QEasingCurve(QEasingCurve::OutCubic).valueForProgress(progress);
+    const double value  = anim.startVal + (anim.endVal - anim.startVal) * eased;
+    const int val = qMax(0, qRound(value));
+
+    // Write straight through View: our own setXPos()/setYPos() deliberately cancel
+    // the animation (anything moving the view wins over it), and we must not cancel
+    // the animation we are driving. Calling the base version keeps that rule
+    // unconditional - no "is this call ours?" flag to get stuck in the wrong state.
+    if (horizontal)
+      View::setXPos(val);
+    else
+      View::setYPos(val);
+
+    // View::setXPos()/setYPos() repaint synchronously, and a repaint can reach code
+    // that moves the view itself (autoscroll, reveal-item, ...). That cancels us,
+    // and its position - not ours - is the one that must stand.
+    if (!anim.timer->isActive())
+      return;
+
+    if (horizontal)
+      emit horizontalScrollAnimated((unsigned)val);
+    else
+      emit verticalScrollAnimated((unsigned)val);
+
+    if (progress >= 1.0)
+      anim.timer->stop();
+}
+
+//---------------------------------------------------------
+//   stopWheelScrollAnim
+//   Stops one axis' animation and forgets its interpolation endpoints, so a
+//   later smoothScrollBy() starts fresh from the current settled position
+//   instead of extending a target that no longer means anything.
+//---------------------------------------------------------
+void Canvas::stopWheelScrollAnim(WheelScrollAnimState& anim)
+{
+    if (anim.timer)
+      anim.timer->stop();
+    anim.startVal   = 0.0;
+    anim.endVal     = 0.0;
+    anim.durationMs = 0;
+}
+
+//---------------------------------------------------------
+//   setXPos / setYPos / setXMag / setYMag
+//   The position/zoom setters are the single funnel through which everything
+//   else (scrollbars, zoom bars, follow-playback, programmatic jumps) moves
+//   this canvas. Whoever does that wins over a running wheel-scroll animation:
+//   if the animation were left running, its next tick would write its own
+//   interpolated value on top - values computed in the *previous* zoom scale
+//   in the setXMag()/setYMag() case, which is what made the canvas snap back
+//   towards position 0 when the zoom bar was used mid-scroll.
+//---------------------------------------------------------
+void Canvas::setXPos(int x)
+{
+    stopWheelScrollAnim(_hWheelAnim);
+    View::setXPos(x);
+}
+
+void Canvas::setYPos(int y)
+{
+    stopWheelScrollAnim(_vWheelAnim);
+    View::setYPos(y);
+}
+
+void Canvas::setXMag(int xs)
+{
+    stopWheelScrollAnim(_hWheelAnim);
+    View::setXMag(xs);
+}
+
+void Canvas::setYMag(int ys)
+{
+    stopWheelScrollAnim(_vWheelAnim);
+    View::setYMag(ys);
+}
+
+//---------------------------------------------------------
+//   setScrollAnimBlocked
+//   Connected to ScrollScale::scaleDragStateChanged(): true while a zoom
+//   slider is held down. Running animations are ended right away (jumped to
+//   their target) rather than left to interpolate across a changing scale.
+//---------------------------------------------------------
+void Canvas::setScrollAnimBlocked(bool block)
+{
+    _scrollAnimBlocked = block;
+    // No need to end a running animation here: the zoom step itself arrives as
+    //  setXMag()/setYMag() plus setXPos()/setYPos(), and each of those already
+    //  cancels it. This flag only stops a NEW animation from starting mid-drag.
+}
+
+void Canvas::hWheelScrollTick() { wheelScrollAnimStep(_hWheelAnim, true); }
+void Canvas::vWheelScrollTick() { wheelScrollAnimStep(_vWheelAnim, false); }
 
 void Canvas::redirectedWheelEvent(QWheelEvent* ev)
       {

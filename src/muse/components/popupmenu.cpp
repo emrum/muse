@@ -586,7 +586,7 @@ void PopupMenu::showContextMenu(const QPoint &pos)
   emit aboutToShowContextMenu(this, _highlightedAction, _contextMenu);
   PopupMenuSetActionData(_contextMenu, this, _highlightedAction);
   if(QMenu* subMenu = _highlightedAction->menu())
-    QTimer::singleShot(100, subMenu, SLOT(hide()));
+    QTimer::singleShot(100, subMenu, &QWidget::hide);   // modern PMF overload, was SLOT(hide())
   _contextMenu->popup(mapToGlobal(pos));
 }
 
