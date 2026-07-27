@@ -359,11 +359,22 @@ void drawCheckerboard(
 }
 
 void drawProgressBarValueRect(QPainter* p, QRect const& rect, QColor const& color, qreal min, qreal max, qreal value,
-  qreal const radius, bool inverted) {
+  qreal const radius, bool inverted, bool vertical) {
   const auto ratio = (max != min) ? (value - min) / (max - min) : 0;
-  const auto w = static_cast<int>(rect.width() * ratio);
-  const auto x = inverted ? rect.x() + rect.width() - w : rect.x();
-  const auto valueRect = QRect{ x, rect.y(), w, rect.height() };
+  QRect valueRect;
+  if (vertical) {
+    const auto h = static_cast<int>(rect.height() * ratio);
+    // Qt's vertical-slider convention (invertedAppearance == false) has
+    // the maximum at the top, so the filled portion grows upward from
+    // the bottom as value increases; inverted flips that, filling
+    // downward from the top instead.
+    const auto y = inverted ? rect.y() : rect.y() + rect.height() - h;
+    valueRect = QRect{ rect.x(), y, rect.width(), h };
+  } else {
+    const auto w = static_cast<int>(rect.width() * ratio);
+    const auto x = inverted ? rect.x() + rect.width() - w : rect.x();
+    valueRect = QRect{ x, rect.y(), w, rect.height() };
+  }
 
   QPainterPath clipPath;
   clipPath.addRoundedRect(rect, radius, radius);

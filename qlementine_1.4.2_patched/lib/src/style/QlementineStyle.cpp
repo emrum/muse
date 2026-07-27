@@ -2867,12 +2867,14 @@ void QlementineStyle::drawComplexControl(
         }
 
         // Draw groove and value.
+        const auto horizontal = sliderOpt->orientation == Qt::Horizontal;
         const auto grooveRect = subControlRect(CC_Slider, opt, SC_SliderGroove, w);
+        // hint: (groove here, is the track or channel where the handle slides along) 
 
         if (sliderOpt->subControls.testFlag(SC_SliderGroove) && grooveRect.isValid()) {
           const auto& grooveColor = sliderGrooveColor(mouse);
           const auto& valueColor = sliderValueColor(mouse);
-          const auto radius = grooveRect.height() / 2.;
+          const auto radius = (horizontal ? grooveRect.height() : grooveRect.width()) / 2.;
 
           // Little trick to avoid having two colors with alpha<255 above one another.
           if (disabled) {
@@ -2885,8 +2887,10 @@ void QlementineStyle::drawComplexControl(
           if (disabled) {
             p->restore();
           }
-          const auto valueRect = grooveRect.adjusted(0, 0, -handleRect.width() + 1, 0);
-          drawProgressBarValueRect(p, valueRect, valueColor, min, max, currentProgress, radius);
+          const auto valueRect = horizontal ? grooveRect.adjusted(0, 0, -handleRect.width() + 1, 0)
+                                             : grooveRect.adjusted(0, handleRect.height() - 1, 0, 0);
+          drawProgressBarValueRect(
+            p, valueRect, valueColor, min, max, currentProgress, radius, sliderOpt->upsideDown, !horizontal);
         }
 
         // Draw handle.
@@ -3259,15 +3263,17 @@ QStyle::SubControl QlementineStyle::hitTestComplexControl(
       return SC_None;
     case CC_Slider:
       if (const auto* optSlider = qstyleoption_cast<const QStyleOptionSlider*>(opt)) {
+        const auto horizontal = optSlider->orientation == Qt::Horizontal;
         const auto handleRect = subControlRect(cc, optSlider, SC_SliderHandle, w);
         if (handleRect.isValid() && handleRect.contains(pos)) {
           return SC_SliderHandle;
         }
 
         const auto grooveRect = subControlRect(cc, optSlider, SC_SliderGroove, w);
-        const auto& clickRect = !handleRect.isValid()
-                                  ? grooveRect
-                                  : QRect{ grooveRect.x(), handleRect.y(), grooveRect.width(), handleRect.height() };
+        const auto& clickRect = !handleRect.isValid() ? grooveRect
+          : horizontal
+          ? QRect{ grooveRect.x(), handleRect.y(), grooveRect.width(), handleRect.height() }
+          : QRect{ handleRect.x(), grooveRect.y(), handleRect.width(), grooveRect.height() };
         if (clickRect.isValid() && clickRect.contains(pos)) {
           return SC_SliderGroove;
         }
@@ -3498,18 +3504,27 @@ QRect QlementineStyle::subControlRect(
       return {};
     case CC_Slider:
       if (const auto* sliderOpt = qstyleoption_cast<const QStyleOptionSlider*>(opt)) {
+        const auto horizontal = sliderOpt->orientation == Qt::Horizontal;
         switch (sc) {
-          case SC_SliderGroove: {
-            const auto grooveW = opt->rect.width();
-            const auto grooveH = _impl->theme.sliderGrooveHeight;
-            const auto grooveX = opt->rect.x();
-            const auto grooveY = opt->rect.y() + (opt->rect.height() - grooveH) / 2;
-            return QRect{ grooveX, grooveY, grooveW, grooveH };
+          case SC_SliderGroove: {  // (groove here, is the track or channel where the handle slides along) 
+            const auto grooveThickness = _impl->theme.sliderGrooveHeight;
+            if (horizontal) {
+              const auto grooveW = opt->rect.width();
+              const auto grooveH = grooveThickness;
+              const auto grooveX = opt->rect.x();
+              const auto grooveY = opt->rect.y() + (opt->rect.height() - grooveH) / 2;
+              return QRect{ grooveX, grooveY, grooveW, grooveH };
+            } else {
+              const auto grooveW = grooveThickness;
+              const auto grooveH = opt->rect.height();
+              const auto grooveX = opt->rect.x() + (opt->rect.width() - grooveW) / 2;
+              const auto grooveY = opt->rect.y();
+              return QRect{ grooveX, grooveY, grooveW, grooveH };
+            }
           } break;
           case SC_SliderHandle: {
-            const auto handleW = pixelMetric(PM_SliderLength);
-            const auto handleH = pixelMetric(PM_SliderThickness);
-            const auto handleY = opt->rect.y() + (opt->rect.height() - handleH) / 2;
+            const auto handleLength = pixelMetric(PM_SliderLength);
+            const auto handleThickness = pixelMetric(PM_SliderThickness);
             const auto min = sliderOpt->minimum;
             const auto max = sliderOpt->maximum;
             auto position = static_cast<qreal>(sliderOpt->sliderPosition);
@@ -3522,9 +3537,29 @@ QRect QlementineStyle::subControlRect(
               }
             }
 
-            const auto ratio = (position - min) / (max - min);
-            const auto handleX = opt->rect.x() + static_cast<int>(ratio * (opt->rect.width() - handleW));
-            return QRect{ handleX, handleY, handleW, handleH };
+            auto ratio = (max > min) ? (position - min) / (max - min) : 0.0;
+            if (sliderOpt->upsideDown) {
+              ratio = 1.0 - ratio;
+            }
+
+            if (horizontal) {
+              const auto handleW = handleLength;
+              const auto handleH = handleThickness;
+              const auto handleY = opt->rect.y() + (opt->rect.height() - handleH) / 2;
+              const auto handleX = opt->rect.x() + static_cast<int>(ratio * (opt->rect.width() - handleW));
+              return QRect{ handleX, handleY, handleW, handleH };
+            } else {
+              const auto handleW = handleThickness;
+              const auto handleH = handleLength;
+              const auto handleX = opt->rect.x() + (opt->rect.width() - handleW) / 2;
+              // Vertical sliders conventionally have their maximum at the
+              // top (when upsideDown is false, the Qt default), so invert
+              // the ratio for the Y axis - the higher the value, the
+              // closer to the top the handle sits.
+              const auto handleY =
+                opt->rect.y() + static_cast<int>((1.0 - ratio) * (opt->rect.height() - handleH));
+              return QRect{ handleX, handleY, handleW, handleH };
+            }
           } break;
           case SC_SliderTickmarks:
             switch (sliderOpt->tickPosition) {
@@ -3538,7 +3573,7 @@ QRect QlementineStyle::subControlRect(
                 const auto tickMarksW = grooveRect.width() - handleThickness;
                 return QRect{ tickMarksX, tickMarksY, tickMarksW, tickMarksH };
               } break;
-              // TODO other tick positions.
+              // TODO other tick positions, and vertical orientation.
               default:
                 break;
             }
@@ -4893,11 +4928,6 @@ void QlementineStyle::polish(QWidget* w) {
     scrollarea->setFocusPolicy(Qt::NoFocus);
   }
 
-  // Make the QSlider horizontal by default.
-  if (auto* slider = qobject_cast<QSlider*>(w)) {
-    slider->setOrientation(Qt::Orientation::Horizontal);
-  }
-
   // Make the QPlainTextEdit have a frame by default.
   if (auto* plainTextEdit = qobject_cast<QPlainTextEdit*>(w)) {
     plainTextEdit->installEventFilter(new TextEditEventFilter(plainTextEdit));
@@ -5875,7 +5905,7 @@ QColor const& QlementineStyle::toolBarSeparatorColor() const {
 }
 
 QColor const& QlementineStyle::toolTipBackgroundColor() const {
-  return _impl->theme.secondaryColor;
+  return _impl->theme.backgroundColorMain4;
 }
 
 QColor const& QlementineStyle::toolTipBorderColor() const {
@@ -5883,7 +5913,7 @@ QColor const& QlementineStyle::toolTipBorderColor() const {
 }
 
 QColor const& QlementineStyle::toolTipForegroundColor() const {
-  return _impl->theme.secondaryColorForeground;
+  return _impl->theme.secondaryColor;
 }
 
 QColor const& QlementineStyle::scrollBarGrooveColor(MouseState const mouse) const {

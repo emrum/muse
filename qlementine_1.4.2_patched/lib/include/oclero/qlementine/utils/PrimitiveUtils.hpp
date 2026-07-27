@@ -70,9 +70,10 @@ void drawCheckerboard(
   QPainter* p, const QRectF& rect, const QColor& darkColor, const QColor& lightColor, const qreal cellWidth);
 
 /// Draws the value of a progress bar. A clipping mask is used to ensure the rectangle radiuses are respected
-/// even for values close to min or max.
+/// even for values close to min or max. Set vertical=true to fill from the bottom/top (by value) instead of
+/// left/right - used for vertical sliders, which reuse this same drawing logic.
 void drawProgressBarValueRect(QPainter* p, QRect const& rect, QColor const& color, qreal min, qreal max, qreal value,
-  qreal const radius = 0., bool inverted = false);
+  qreal const radius = 0., bool inverted = false, bool vertical = false);
 
 /// Draws a color mark. Will draw a border if the contrast between color and background is not high enough.
 void drawColorMark(QPainter* p, QRect const& rect, const QColor& color, const QColor& borderColor, int borderWidth = 1);

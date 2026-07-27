@@ -290,20 +290,18 @@ void Theme::initializePalette() {
   palette.setColor(QPalette::ColorGroup::Disabled, QPalette::ColorRole::NoRole, backgroundColorMainTransparent);
 
   // Tooltips.
-  // NOTE (fix): previously sourced ToolTipBase directly from secondaryColor,
-  //  the exact same field used below for QPalette::Text/WindowText (ordinary
-  //  label text). That aliases a background role and a foreground role onto
-  //  one theme color; no choice of secondaryColor can serve both jobs at
-  //  once; a value tuned to be readable as tooltip background silently
-  //  breaks contrast for ordinary text elsewhere in the app (or vice
-  //  versa), since the two are only reachable as one combined field. Give
-  //  tooltips their own surface (backgroundColorMain3, matching the
-  //  "raised panel" shade already used for other elevated surfaces in this
-  //  theme) and let secondaryColor keep doing its actual job - "text on a
-  //  light background" - as the tooltip's text color too, instead of a
-  //  bespoke secondaryColorForeground pairing that only existed to make
-  //  secondaryColor-as-background legible.
-  palette.setColor(QPalette::ColorGroup::All, QPalette::ColorRole::ToolTipBase, backgroundColorMain3);
+  // secondaryColor is used throughout this theme as the general
+  // foreground/text color (see Text, WindowText, and the many
+  // *ForegroundColor accessors in QlementineStyle.cpp). Tooltips need
+  // their own distinct background rather than reusing secondaryColor for
+  // that purpose - backgroundColorMain4 is used instead, matching
+  // QlementineStyle::toolTipBackgroundColor() (the function that actually
+  // paints the tooltip; PE_PanelTipLabel reads that directly and does NOT
+  // consult this palette value at all - it's set here only so anything
+  // Qt itself derives from the palette stays consistent with what's
+  // actually painted). ToolTipText stays secondaryColor, consistent with
+  // ordinary text everywhere else.
+  palette.setColor(QPalette::ColorGroup::All, QPalette::ColorRole::ToolTipBase, backgroundColorMain4);
   palette.setColor(QPalette::ColorGroup::All, QPalette::ColorRole::ToolTipText, secondaryColor);
 
   // Highlight.
