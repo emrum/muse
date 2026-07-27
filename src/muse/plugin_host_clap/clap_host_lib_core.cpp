@@ -427,6 +427,29 @@ bool ClapInstanceCore::init(ClapSynth* s, const QString& displayName)
 
 void ClapInstanceCore::shutdown()
 {
+  // Last-resort recovery. Reaching here while still processing means a host path
+  //  skipped the stop+deactivate pass (Song::clear(), MusE::closeEvent()).
+  //  plugin->destroy() on an activated instance is a host error and u-he plugins
+  //  abort on it, so drive the stop through the audio thread NOW - while we are
+  //  still in s_liveInstances, which is what stopAllProcessingOnAudioThread()
+  //  iterates - and let the deactivate below then succeed.
+  //  Only when the engine is live and we are not already on the audio thread:
+  //  otherwise sendMsg() would run the message inline on this thread and trip
+  //  u-he's thread-identity check on stop_processing().
+  if(_plugin && _clapProcessing && !hostIsAudioThread() &&
+     MusEGlobal::audio && MusEGlobal::audio->isRunning())
+  {
+    fprintf(stderr,
+      "ClapInstanceCore::shutdown: '%s' still processing at destroy time - "
+      "driving stop_processing() through the audio thread now. Whoever destroyed "
+      "this instance should have stopped it first.\n",
+      _displayName.toLocal8Bit().constData());
+
+    // Block any queued marshaled activate() from resurrecting us in between.
+    _teardown = true;
+    MusEGlobal::audio->msgClapStopProcessing();
+  }
+
   const auto it = std::find(s_liveInstances.begin(), s_liveInstances.end(), this);
   if(it != s_liveInstances.end())
     s_liveInstances.erase(it);
@@ -455,13 +478,10 @@ void ClapInstanceCore::shutdown()
     //   - Mid-session removal: SynthI::deactivate3() calls _core.deactivate()
     //     before delete _sif -> shutdown().
     //
-    // ASSUMPTION: the instance was deactivated (and its stop_processing() driven
-    // through the audio thread) before this destructor runs — i.e. via
-    // deactivateAllBeforeAudioShutdown() at quit, or MusE's detach-first track
-    // removal mid-session. If a future path destroys a still-processing CLAP
-    // instance without that, we can't stop it safely here (wrong thread) and
-    // destroy() may abort; such a path must stop+deactivate via the audio thread
-    // first.
+    // If the recovery at the top of this function could not run (engine already
+    //  stopped, or we are on the audio thread), we still cannot stop it safely
+    //  here and destroy() may abort. Such a path must stop+deactivate via the
+    //  audio thread first - see Song::clear() and MusE::closeEvent().
     if(!_clapProcessing && _pluginActivated.exchange(false))
     {
       // Processing already stopped; deactivate() is [main-thread] — finish it.
@@ -470,8 +490,9 @@ void ClapInstanceCore::shutdown()
     else if(_clapProcessing)
     {
       fprintf(stderr,
-        "ClapInstanceCore::shutdown: '%s' still processing at destroy time — "
-        "cannot stop_processing() off the audio thread; destroying anyway\n",
+        "ClapInstanceCore::shutdown: '%s' STILL processing at destroy time — "
+        "cannot stop_processing() off the audio thread; destroying anyway "
+        "(the plugin may abort)\n",
         _displayName.toLocal8Bit().constData());
     }
 

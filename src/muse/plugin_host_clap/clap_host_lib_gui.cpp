@@ -292,7 +292,6 @@ void ClapInstanceCore::showNativeGui(bool v)
 
   if(v)
   {
-    const bool wasAlreadyCreated = _isGuiCreated;
     if(!_isGuiCreated)
     {
       const char* api =
