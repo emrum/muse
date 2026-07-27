@@ -825,6 +825,13 @@ AudioStripProperties::AudioStripProperties()
 
 void AudioStrip::heartBeat()
 {
+   // heartBeatTimer is an EXTERNAL connection: it keeps firing while the strip is
+   //  waiting to be deleted, and by then its track may already be gone.
+   //  MidiStrip::heartBeat() guards for this, and the rest of this class is full of
+   //  'if(!track) return;' - this one dereferenced straight away.
+   if(!track)
+     return;
+
    const int tch = track->channels();
    for (int ch = 0; ch < tch; ++ch) {
       if (meter[ch]) {

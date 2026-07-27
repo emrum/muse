@@ -114,6 +114,26 @@ class AudioMixerApp : public QMainWindow {
         UNHANDLED_NUMBER = -5002
       };
       MusEGlobal::MixerConfig* cfg;
+
+      // THREE lists describe the mixer, in three different index spaces. Mixing
+      //  their indices up is a real hazard - it is what corrupted stripList and
+      //  crashed songChanged(); see the clamping note in addStrip().
+      //
+      //   1. MusEGlobal::song->tracks()  - the tracks themselves, the source of truth.
+      //   2. cfg->stripConfigList        - the PERSISTED per-strip settings (visible,
+      //      width, order), matched to tracks by QUuid and saved in the song file.
+      //      It keeps entries for deleted tracks, flagged _deleted, so an undone
+      //      track deletion can find its settings again (see the note in gconfig.h).
+      //      Positions in it are therefore counted over the NON-deleted entries only.
+      //   3. stripList                   - the live Strip widgets, one per track that
+      //      currently has one. This is the only one that can lag behind: it is
+      //      rebuilt incrementally by updateStripList() and reordered by
+      //      redrawMixer()/fillStripListTraditional().
+      //
+      // So an index into 2 is NOT an index into 3, above all while a project is
+      //  loading - the config list arrives complete from the file whereas stripList
+      //  is still being filled in track by track.
+      // Invariant: stripList never contains a null. See appendStripForTrack().
       StripList stripList;
 
       QScrollArea* view;
@@ -164,6 +184,9 @@ class AudioMixerApp : public QMainWindow {
       bool updateStripList();
       void fillStripListTraditional();
       Strip* findStripForTrack(StripList &s, MusECore::Track *t);
+      // Appends the existing strip for 't' to stripList, or reports and skips if
+      //  there is none. Never appends a null - see the definition.
+      void appendStripForTrack(StripList &oldList, MusECore::Track *t);
       void updateSelectedStrips();
       void moveConfig(const Strip* s, int new_pos);
 

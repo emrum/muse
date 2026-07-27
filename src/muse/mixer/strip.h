@@ -823,6 +823,10 @@ class Strip : public QFrame {
       
       void setRecordFlag(bool flag);
       MusECore::Track* getTrack() const { return track; }
+      // Makes the strip inert so that it can be destroyed from the event loop
+      //  instead of synchronously. See the definition, and the call in
+      //  AudioMixerApp::updateStripList().
+      void prepareForDeletion();
       void setHighLight(bool highlight);
       QString getLabelText();
 

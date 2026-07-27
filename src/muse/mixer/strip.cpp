@@ -1629,6 +1629,37 @@ Strip::~Strip()
       {
       }
 
+//---------------------------------------------------------
+//   prepareForDeletion
+//   Unhooks everything that could call into this strip, so that it is safe to
+//   destroy it later from the event loop rather than synchronously.
+//   Why this is needed: the strips are deleted because their track is gone, so
+//   'track' is a dangling pointer from that moment on. deleteLater() keeps the
+//   strip alive across event loop turns, and heartBeatTimer - an EXTERNAL
+//   connection, made in the AudioStrip/MidiStrip constructors - keeps firing in
+//   the meantime, which is exactly the crash those constructors warn about.
+//   After this call: no external signal reaches us, we emit nothing, we do not
+//   paint, and track is null (the class already guards for that everywhere).
+//---------------------------------------------------------
+
+void Strip::prepareForDeletion()
+      {
+      // The heartbeat is the one connection from outside our own widget tree.
+      if(MusEGlobal::heartBeatTimer)
+        disconnect(MusEGlobal::heartBeatTimer, nullptr, this, nullptr);
+
+      // Stop emitting into the mixer (visibleChanged, userWidthChanged, moveStrip,
+      //  clearStripSelection) while we wait to be destroyed.
+      disconnect();
+
+      // Drop the dangling track before anything can read it again.
+      track = nullptr;
+
+      // Nothing to paint, and it must not linger on screen as a ghost strip: it is
+      //  no longer in stripList, so redrawMixer() will not lay it out again.
+      hide();
+      }
+
 void Strip::setFocusYieldWidget(QWidget* w)
 {
   if(_focusYieldWidget == w)

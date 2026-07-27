@@ -511,6 +511,39 @@ Strip* AudioMixerApp::findStripForTrack(StripList &sl, MusECore::Track *t)
   return nullptr;
 }
 
+//---------------------------------------------------------
+//   appendStripForTrack
+//   findStripForTrack() returns null when no strip exists for the track (yet).
+//   That null must NEVER reach stripList: every consumer dereferences the entries
+//   unchecked - songChanged() crashed on exactly that while loading a project,
+//   in the '(*si)->songChanged(flags)' loop.
+//   updateStripList() is what creates strips. Getting here means it has not run
+//   for this track yet (songChanged() only calls it for
+//   SC_TRACK_INSERTED/SC_TRACK_REMOVED, while redrawMixer() also runs for
+//   SC_TRACK_MOVED alone), so skip the track - the next updateStripList() adds it
+//   - and say so, because the two being out of step is the actual problem.
+//---------------------------------------------------------
+
+void AudioMixerApp::appendStripForTrack(StripList &oldList, MusECore::Track *t)
+{
+  if(!t)
+  {
+    fprintf(stderr, "AudioMixerApp::appendStripForTrack: null track\n");
+    return;
+  }
+
+  Strip* s = findStripForTrack(oldList, t);
+  if(!s)
+  {
+    fprintf(stderr, "AudioMixerApp::appendStripForTrack: no strip for track <%s>"
+                    " - skipping (updateStripList() is out of step)\n",
+            t->name().toLocal8Bit().constData());
+    return;
+  }
+
+  stripList.append(s);
+}
+
 void AudioMixerApp::fillStripListTraditional()
 {
   StripList oldList = stripList;
@@ -521,21 +554,21 @@ void AudioMixerApp::fillStripListTraditional()
   MusECore::TrackList::iterator tli = tl->begin();
   for (; tli != tl->end(); ++tli) {
     if ((*tli)->type() == MusECore::Track::AUDIO_INPUT)
-      stripList.append(findStripForTrack(oldList,*tli));
+      appendStripForTrack(oldList, *tli);
   }
 
   //  Synthesizer Strips
   tli = tl->begin();
   for (; tli != tl->end(); ++tli) {
     if ((*tli)->type() == MusECore::Track::AUDIO_SOFTSYNTH)
-      stripList.append(findStripForTrack(oldList,*tli));
+      appendStripForTrack(oldList, *tli);
   }
 
   //  generate Wave Track Strips
   tli = tl->begin();
   for (; tli != tl->end(); ++tli) {
     if ((*tli)->type() == MusECore::Track::WAVE)
-      stripList.append(findStripForTrack(oldList,*tli));
+      appendStripForTrack(oldList, *tli);
   }
 
   //  generate Midi channel/port Strips
@@ -543,28 +576,28 @@ void AudioMixerApp::fillStripListTraditional()
   for (; tli != tl->end(); ++tli) {
     if ((*tli)->type() == MusECore::Track::MIDI ||
         (*tli)->type() == MusECore::Track::DRUM)
-      stripList.append(findStripForTrack(oldList,*tli));
+      appendStripForTrack(oldList, *tli);
   }
 
   //  Groups
   tli = tl->begin();
   for (; tli != tl->end(); ++tli) {
     if ((*tli)->type() == MusECore::Track::AUDIO_GROUP)
-      stripList.append(findStripForTrack(oldList,*tli));
+      appendStripForTrack(oldList, *tli);
   }
 
   //  Aux
   tli = tl->begin();
   for (; tli != tl->end(); ++tli) {
     if ((*tli)->type() == MusECore::Track::AUDIO_AUX)
-      stripList.append(findStripForTrack(oldList,*tli));
+      appendStripForTrack(oldList, *tli);
   }
 
   //    Master
   tli = tl->begin();
   for (; tli != tl->end(); ++tli) {
     if ((*tli)->type() == MusECore::Track::AUDIO_OUTPUT)
-      stripList.append(findStripForTrack(oldList,*tli));
+      appendStripForTrack(oldList, *tli);
   }
 }
 
@@ -1009,8 +1042,33 @@ void AudioMixerApp::addStrip(const MusECore::Track* t, const MusEGlobal::StripCo
     }
     else
     {
-      DEBUG_MIXER(stderr, "inserting new strip [%s] at %d\n", t->name().toLocal8Bit().data(), insert_pos);
-      stripList.insert(insert_pos, strip);
+      // insert_pos is an index into cfg->stripConfigList (counting only the
+      //  non-deleted configs - see the caller in updateStripList()), which is NOT
+      //  the same coordinate system as stripList. While a project loads, the
+      //  config list arrives fully populated from the file whereas stripList is
+      //  still being built up track by track, so insert_pos can easily be past
+      //  the end here.
+      // QList::insert() requires 0 <= i <= size(). Beyond that it is out of range,
+      //  and in a release build - where Q_ASSERT is compiled out - it corrupts the
+      //  list instead of complaining. The damage only surfaces later, as a null or
+      //  garbage Strip* dereferenced in songChanged().
+      int pos = insert_pos;
+      if(pos > stripList.size())
+      {
+        fprintf(stderr, "AudioMixerApp::addStrip: insert position %d is past the end of"
+                        " stripList (size %d) for track <%s> - appending instead\n",
+                insert_pos, (int)stripList.size(), t->name().toLocal8Bit().constData());
+        pos = stripList.size();
+      }
+      else if(pos < 0)
+      {
+        fprintf(stderr, "AudioMixerApp::addStrip: negative insert position %d for"
+                        " track <%s> - prepending instead\n",
+                insert_pos, t->name().toLocal8Bit().constData());
+        pos = 0;
+      }
+      DEBUG_MIXER(stderr, "inserting new strip [%s] at %d\n", t->name().toLocal8Bit().data(), pos);
+      stripList.insert(pos, strip);
     }
 
     strip->setVisible(sc._visible);
@@ -1033,14 +1091,20 @@ void AudioMixerApp::addStrip(const MusECore::Track* t, const MusEGlobal::StripCo
 void AudioMixerApp::clearAndDelete()
 {
   DEBUG_MIXER(stderr, "clearAndDelete\n");
-  // Remove and delete only strip widgets from the layout, not spacers/stretchers etc.
-//  StripList::iterator si = stripList.begin();
-//  for (; si != stripList.end(); ++si)
+  // Iterating stripList means only strips are touched - the layout's spacers and
+  //  stretchers are left alone without needing to filter for them (redrawMixer()
+  //  is the one that has to, because it walks the layout itself).
+  // The delete is synchronous on purpose, unlike updateStripList()'s: this runs
+  //  from MusE::clearSong() BEFORE Song::clear(), so the tracks are still alive
+  //  and no strip is left holding a dangling one. The surrounding clear/load
+  //  sequence also expects these widgets to be gone by the time it continues -
+  //  each strip registered itself with MusE::addPendingObjectDestruction().
   DEBUG_MIXER(stderr, "AudioMixerApp::clearAndDelete(): Before: mixerLayout count %d\n", mixerLayout->count());
   for (auto& si : stripList)
   {
+    if(!si)
+      continue;
     mixerLayout->removeWidget(si);
-    //(*si)->deleteLater();
     delete si;
   }
   DEBUG_MIXER(stderr, "AudioMixerApp::clearAndDelete(): After: mixerLayout count %d\n", mixerLayout->count());
@@ -1153,11 +1217,30 @@ bool AudioMixerApp::updateStripList()
   const MusECore::TrackList *tl = MusEGlobal::song->tracks();
   // check for superfluous strips
   for (StripList::iterator si = stripList.begin(); si != stripList.end(); ) {
+    if (!*si)
+    {
+      fprintf(stderr, "AudioMixerApp::updateStripList: null strip in stripList - removing\n");
+      si = stripList.erase(si);
+      changed = true;
+      continue;
+    }
     if (!tl->contains((*si)->getTrack())) {
       DEBUG_MIXER(stderr, "Did not find track for strip %s - Removing\n", (*si)->getLabelText().toLocal8Bit().data());
-      //(*si)->deleteLater();
-      delete (*si);
+
+      // Order matters here.
+      // 1) Out of stripList first, so no consumer can reach it any more - we are
+      //    called from songChanged(), whose strip loop runs right after us.
+      // 2) prepareForDeletion() makes it inert: the strip is going away because its
+      //    track is gone, so 'track' is dangling from now on, and heartBeatTimer -
+      //    an external connection - would otherwise keep calling heartBeat() on it.
+      // 3) deleteLater() instead of a plain delete: this runs inside a
+      //    Song::songChanged emission, and ~Strip -> ~QWidget tears down a widget
+      //    subtree, emits destroyed() (which MusE::objectDestroyed() acts on) and
+      //    invalidates the layout. None of that belongs in the middle of a signal.
+      Strip* s = *si;
       si = stripList.erase(si);
+      s->prepareForDeletion();
+      s->deleteLater();
       changed = true;
     }
     else
@@ -1334,8 +1417,17 @@ void AudioMixerApp::songChanged(MusECore::SongChangedStruct_t flags)
     redrawMixer();
   }
 
+  // Tripwire: nothing may put a null in stripList (see appendStripForTrack()).
+  //  Keep going rather than crash if something ever does again, and name it.
   StripList::iterator si = stripList.begin();
   for (; si != stripList.end(); ++si) {
+        if(!*si)
+        {
+          fprintf(stderr, "AudioMixerApp::songChanged: null strip in stripList"
+                          " at index %d of %d - skipping\n",
+                  (int)(si - stripList.begin()), (int)stripList.size());
+          continue;
+        }
         (*si)->songChanged(flags);
         }
 
