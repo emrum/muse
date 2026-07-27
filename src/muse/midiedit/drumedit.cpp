@@ -691,9 +691,24 @@ DrumEdit::DrumEdit(MusECore::PartList* pl, QWidget* parent, const char* name, un
       gridS1->addWidget(dlist, 1, 0);
 
       connect(canvas, SIGNAL(newWidth(int)), SLOT(newCanvasWidth(int)));
-      connect(canvas, SIGNAL(verticalScroll(unsigned)), vscroll, SLOT(setPos(unsigned)));
-      connect(canvas,  SIGNAL(horizontalScroll(unsigned)),hscroll, SLOT(setPos(unsigned)));
+      // canvas's verticalScroll/horizontalScroll mean "move the view here" and come
+      // from several places (autoscroll while dragging, ctrl+wheel zoom pan,
+      // reveal-selection, ...). The *BarSyncPos slots move the scrollbar and let its
+      // own scrollChanged cascade drive canvas/dlist/time, as it always did.
+      // The wheel-scroll animation does NOT use this path - it drives everything per
+      // frame through *ScrollAnimated below.
+      connect(canvas, SIGNAL(verticalScroll(unsigned)), SLOT(verticalScrollBarSyncPos(unsigned)));
+      connect(canvas, SIGNAL(horizontalScroll(unsigned)), SLOT(horizontalScrollBarSyncPos(unsigned)));
       connect(canvas,  SIGNAL(horizontalScrollNoLimit(unsigned)),hscroll, SLOT(setPosNoLimit(unsigned)));
+      // Drum instrument list sidebar and time ruler follow the canvas's
+      // smooth wheel-scroll animation directly (canvas keeps itself in
+      // sync internally).
+      connect(canvas, SIGNAL(verticalScrollAnimated(unsigned)), SLOT(verticalScrollAnimatedSetYpos(unsigned)));
+      connect(canvas, SIGNAL(horizontalScrollAnimated(unsigned)), SLOT(horizontalScrollAnimatedSetXpos(unsigned)));
+
+      // No animated scrolling while a zoom slider is dragged - see Canvas::setScrollAnimBlocked().
+      connect(hscroll, SIGNAL(scaleDragStateChanged(bool)), canvas, SLOT(setScrollAnimBlocked(bool)));
+      connect(vscroll, SIGNAL(scaleDragStateChanged(bool)), canvas, SLOT(setScrollAnimBlocked(bool)));
       connect(MusEGlobal::song, SIGNAL(songChanged(MusECore::SongChangedStruct_t)), SLOT(songChanged1(MusECore::SongChangedStruct_t)));
       connect(MusEGlobal::song, SIGNAL(songChanged(MusECore::SongChangedStruct_t)),      dlist, SLOT(songChanged(MusECore::SongChangedStruct_t)));
       connect(vscroll, SIGNAL(scrollChanged(int)), canvas, SLOT(setYPos(int)));
@@ -889,6 +904,47 @@ void DrumEdit::midiNote(int pitch, int velo)
         dlist->setCurDrumInstrument(index);
     }
 }
+
+//---------------------------------------------------------
+//   verticalScrollBarSyncPos / horizontalScrollBarSyncPos
+//   See Arranger's identically-named slots for the full rationale: these
+//   handle "move the view here" and must NOT be silent - autoscroll, zoom pan
+//   and reveal-selection all emit verticalScroll()/horizontalScroll() and need
+//   the canvas to follow through the scrollbar's own cascade.
+//---------------------------------------------------------
+
+void DrumEdit::verticalScrollBarSyncPos(unsigned ypos)
+      {
+      vscroll->setPos(ypos);
+      }
+
+void DrumEdit::horizontalScrollBarSyncPos(unsigned xpos)
+      {
+      hscroll->setPos(xpos);
+      }
+
+//---------------------------------------------------------
+//   verticalScrollAnimatedSetYpos / horizontalScrollAnimatedSetXpos
+//   Adapters for canvas's *ScrollAnimated signals (unsigned) to dlist's/
+//   time's existing setYPos(int)/setXPos(int) slots - a direct connection
+//   would silently fail to match at runtime since old-style SIGNAL/SLOT
+//   macros require exact parameter type strings.
+//---------------------------------------------------------
+
+void DrumEdit::verticalScrollAnimatedSetYpos(unsigned ypos)
+      {
+      dlist->setYPos((int)ypos);
+      // Keep the handle in step with the animation, silently - the canvas is
+      // already there, and cascading back would cancel the animation.
+      vscroll->setPosSilent(ypos);
+      }
+
+void DrumEdit::horizontalScrollAnimatedSetXpos(unsigned xpos)
+      {
+      time->setXPos((int)xpos);
+      hscroll->setPosSilent(xpos);
+      }
+
 //---------------------------------------------------------
 //   horizontalZoom
 //---------------------------------------------------------

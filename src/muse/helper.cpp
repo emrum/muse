@@ -27,7 +27,6 @@
 #ifdef QLEMENTINE_SUPPORT
 #include "muse_theme.h"
 #include <oclero/qlementine/style/QlementineStyle.hpp>
-#include <QToolTip>
 #endif
 #include "song.h"
 #include "app.h"
@@ -2411,38 +2410,6 @@ void watchThemeFile(const QString& path)
 #endif // QLEMENTINE_SUPPORT
 
 //---------------------------------------------------------
-//   fixupTooltipPalette
-//    Qlementine's Theme::initializePalette() (Theme.cpp) sources
-//    QPalette::ToolTipBase from theme.secondaryColor - the SAME field
-//    QPalette::Text/WindowText use for ordinary label text (e.g. the
-//    ArrangerToolbar's plain QLabels, via "Cursor" and similar). That's
-//    two incompatible roles - a background surface vs. foreground text
-//    meant to sit on a LIGHT background - sharing one theme color, purely
-//    by accident of Theme's own implementation, not a MusE mistake. No
-//    choice of secondaryColor value fixes it: whatever reads well as a
-//    tooltip background reads poorly as ordinary text, or vice versa.
-//
-//    Rather than patch Qlementine's Theme.cpp, give the tooltip its own
-//    surface here instead - backgroundColorMain3 (matches the "raised
-//    panel" look used elsewhere in the theme) with theme.secondaryColor
-//    itself as the tooltip's text color, since that's already exactly
-//    right for "text on a light background" - its job everywhere else in
-//    the palette. Must run AFTER style->setTheme(), not before: setTheme()
-//    re-applies theme.palette to both qApp and QToolTip internally
-//    (QlementineStyle.cpp, ~line 115), so anything set earlier just gets
-//    overwritten.
-//---------------------------------------------------------
-
-static void fixupTooltipPalette(const oclero::qlementine::Theme& theme)
-{
-    QPalette pal = qApp->palette();
-    pal.setColor(QPalette::ColorGroup::All, QPalette::ColorRole::ToolTipBase, theme.backgroundColorMain3);
-    pal.setColor(QPalette::ColorGroup::All, QPalette::ColorRole::ToolTipText, theme.secondaryColor);
-    qApp->setPalette(pal);
-    QToolTip::setPalette(pal);
-}
-
-//---------------------------------------------------------
 //   loadQlementineTheme
 //    "Main Theme (Qlementine)" in Appearance - standard-widget chrome.
 //    Prefers themes/<theme>.json (Qlementine Theme); falls back to the
@@ -2501,17 +2468,6 @@ void loadQlementineTheme(const QString& theme)
     if (const auto museTheme = MuseTheme::fromJsonPath(jsonPath))
     {
         style->setTheme(*museTheme);
-
-        // Correct the ToolTipBase/ToolTipText roles that Qlementine's own
-        //  Theme::initializePalette() ties to secondaryColor - the same
-        //  field ordinary label text (QPalette::Text/WindowText) uses.
-        //  See fixupTooltipPalette() above for why. (Previously this spot
-        //  had a redundant qApp->setPalette(style->standardPalette())
-        //  call, removed as a no-op since setTheme() already does that
-        //  internally - this is a different, narrower fix: two specific
-        //  roles, applied after setTheme() specifically so it isn't
-        //  clobbered by setTheme()'s own palette application.)
-        fixupTooltipPalette(*museTheme);
 
         if (MusEGlobal::debugMsg)
             fprintf(stderr, "loadQlementineTheme: applied Qlementine/JSON theme <%s>\n",

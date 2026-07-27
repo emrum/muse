@@ -208,6 +208,17 @@ class PianoRoll : public MidiEditor {
       void pianoConfigMenuAboutToHide();
       void pianoConfigClicked();
       void updateVScrollRange();
+      // See Arranger's identically-named slots (arranger.h/.cpp) for the
+      // full rationale: canvas's verticalScroll/horizontalScroll now fire
+      // once per new wheel-scroll target rather than per animation frame;
+      // these move vscroll/hscroll there instantly without cascading back
+      // to canvas/piano/time, which instead follow the animation directly
+      // via canvas's verticalScrollAnimated/horizontalScrollAnimated
+      // signals (see the two adapter slots below).
+      void verticalScrollBarSyncPos(unsigned);
+      void horizontalScrollBarSyncPos(unsigned);
+      void verticalScrollAnimatedSetYpos(unsigned);
+      void horizontalScrollAnimatedSetXpos(unsigned);
 
    signals:
       void isDeleting(MusEGui::TopWin*);

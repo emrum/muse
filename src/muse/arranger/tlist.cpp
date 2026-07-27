@@ -145,10 +145,13 @@ TList::TList(Header* hdr, QWidget* parent, const char* name)
     //setBackgroundMode(Qt::NoBackground); // ORCAN - FIXME. DELETETHIS?
     //setAttribute(Qt::WA_OpaquePaintEvent);
     resizeFlag = false;
+    _cachedSoloTrack1 = nullptr;
+    _cachedSoloTrack2 = nullptr;
 
     connect(MusEGlobal::song, SIGNAL(songChanged(MusECore::SongChangedStruct_t)), SLOT(songChanged(MusECore::SongChangedStruct_t)));
     connect(MusEGlobal::muse, SIGNAL(configChanged()), SLOT(redraw()));
     connect(MusEGlobal::heartBeatTimer, SIGNAL(timeout()), SLOT(maybeUpdateVolatileCustomColumns()));
+    updateSoloTrackCache();
 }
 
 //---------------------------------------------------------
@@ -169,7 +172,35 @@ void TList::songChanged(MusECore::SongChangedStruct_t flags)
         adjustScrollbar();
     if (flags & SC_TRACK_REMOVED && !MusEGlobal::song->tracks()->empty() && !MusECore::tracks_are_selected())
         MusEGlobal::song->tracks()->at(0)->setSelected(true);
+    if (flags & (SC_SOLO | SC_TRACK_INSERTED | SC_TRACK_REMOVED))
+        updateSoloTrackCache();
 
+}
+
+//---------------------------------------------------------
+//   updateSoloTrackCache
+//   Refreshes _cachedSoloTrack1/2 (see tlist.h). Called on construction
+//   and whenever songChanged() reports a flag that could affect which
+//   tracks are soloed - NOT from paint()/paintEvent(), which would defeat
+//   the point of caching.
+//---------------------------------------------------------
+
+void TList::updateSoloTrackCache()
+{
+    _cachedSoloTrack1 = nullptr;
+    _cachedSoloTrack2 = nullptr;
+    MusECore::TrackList* tl = MusEGlobal::song->tracks();
+    for (MusECore::ciTrack it = tl->begin(); it != tl->end(); ++it) {
+        MusECore::Track* t = *it;
+        if (t->internalSolo() || t->solo()) {
+            if (!_cachedSoloTrack1)
+                _cachedSoloTrack1 = t;
+            else if (!_cachedSoloTrack2) {
+                _cachedSoloTrack2 = t;
+                break;
+            }
+        }
+    }
 }
 
 //---------------------------------------------------------
@@ -320,26 +351,12 @@ void TList::paint(const QRect& r)
     mask.setColorAt(0.85, mask_edge);
     mask.setColorAt(1, mask_edge);
 
-    // Find up to two tracks that are soloed.
-    MusECore::Track* solo_t_1 = nullptr;
-    MusECore::Track* solo_t_2 = nullptr;
-    {
-        MusECore::TrackList* tl = MusEGlobal::song->tracks();
-        for(MusECore::ciTrack it = tl->begin(); it != tl->end(); ++it)
-        {
-            MusECore::Track* t = *it;
-            if(t->internalSolo() || t->solo())
-            {
-                if(!solo_t_1)
-                    solo_t_1 = t;
-                else if(!solo_t_2)
-                    solo_t_2 = t;
-            }
-            // Did we find at least two tracks? Done.
-            if(solo_t_1 && solo_t_2)
-                break;
-        }
-    }
+    // Find up to two tracks that are soloed. Cached in
+    // _cachedSoloTrack1/2, refreshed by updateSoloTrackCache() only when
+    // songChanged() reports something that could affect solo state - see
+    // tlist.h for why this isn't rescanned here on every call.
+    MusECore::Track* solo_t_1 = _cachedSoloTrack1;
+    MusECore::Track* solo_t_2 = _cachedSoloTrack2;
 
     //      const int header_fh = header->fontMetrics().lineSpacing();
     //      const int svg_sz = qMin(header_fh + 2, qMax(MIN_TRACKHEIGHT - 5, 6)); // ???

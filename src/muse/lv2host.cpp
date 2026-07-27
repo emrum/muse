@@ -6921,12 +6921,11 @@ void LV2PluginWrapper_Window::closeEvent(QCloseEvent *event)
 
 void LV2PluginWrapper_Window::stopUpdateTimer()
 {
-    if(updateTimer.isActive())
-        updateTimer.stop();
-    while(updateTimer.isActive())
-    {
-        QCoreApplication::processEvents();
-    }
+    // QTimer::stop() clears isActive() synchronously, so there is nothing to wait for.
+    // Removed a 'while(updateTimer.isActive()) QCoreApplication::processEvents();' loop
+    //  here: it could never execute, and had it ever done so it would have been an
+    //  unbounded nested event loop inside plugin GUI teardown.
+    updateTimer.stop();
 }
 
 

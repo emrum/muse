@@ -189,6 +189,12 @@ private slots:
 
     void deltaModeChanged(bool);
     void midiNote(int pitch, int velo);
+    // See Arranger's identically-named slots (arranger.h/.cpp) for the
+    // full rationale.
+    void verticalScrollBarSyncPos(unsigned);
+    void horizontalScrollBarSyncPos(unsigned);
+    void verticalScrollAnimatedSetYpos(unsigned);
+    void horizontalScrollAnimatedSetXpos(unsigned);
 
 public slots:
     void setSelection(int tick, MusECore::Event&, MusECore::Part*, bool update);

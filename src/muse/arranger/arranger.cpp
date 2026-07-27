@@ -34,6 +34,7 @@
 #include <QList>
 //#include <QMainWindow>
 #include <QScrollBar>
+#include <QTimer>
 #include <QToolBar>
 //#include <QVBoxLayout>
 #include <QWheelEvent>
@@ -93,6 +94,11 @@
 #include "pcanvas.h"
 
 namespace MusEGui {
+
+// Ceiling on how often the vertical drag cascade runs, in milliseconds.
+// Keep in step with SCROLL_DRAG_THROTTLE_MS in scrollscale.cpp.
+#define VSCROLL_DRAG_THROTTLE_MS 33
+
 
 std::vector<Arranger::custom_col_t> Arranger::custom_columns;
 QByteArray Arranger::header_state;
@@ -522,17 +528,41 @@ Arranger::Arranger(ArrangerView* parent, const char* name)
       egrid->addWidget(vscroll, 2, 1);
       egrid->addLayout(bottomHLayout, 3, 0);
 
-      connect(vscroll, SIGNAL(valueChanged(int)), canvas, SLOT(setYPos(int)));
+      // vscroll's cascade goes through one throttled handler (which moves canvas and
+      //  list together) rather than two direct connections - see
+      //  verticalScrollValueChanged(). hscroll does its own throttling internally.
+      _pendingVScrollVal = -1;
+      _vScrollThrottleTimer = new QTimer(this);
+      _vScrollThrottleTimer->setSingleShot(true);
+      _vScrollThrottleTimer->setTimerType(Qt::PreciseTimer);
+      connect(_vScrollThrottleTimer, &QTimer::timeout, this, &Arranger::vScrollThrottleTick);
+      connect(vscroll, &QScrollBar::valueChanged,   this, &Arranger::verticalScrollValueChanged);
+      connect(vscroll, &QScrollBar::sliderReleased, this, &Arranger::vScrollSliderReleased);
       connect(hscroll, SIGNAL(scrollChanged(int)), canvas, SLOT(setXPos(int)));
       connect(hscroll, SIGNAL(scaleChanged(int)),  canvas, SLOT(setXMag(int)));
-      connect(vscroll, SIGNAL(valueChanged(int)), list,   SLOT(setYPos(int)));
       connect(hscroll, SIGNAL(scrollChanged(int)), time,   SLOT(setXPos(int)));
       connect(hscroll, SIGNAL(scaleChanged(int)),  time,   SLOT(setXMag(int)));
       connect(canvas,  SIGNAL(timeChanged(unsigned)),   SLOT(setTime(unsigned)));
-      connect(canvas,  SIGNAL(verticalScroll(unsigned)),SLOT(verticalScrollSetYpos(unsigned)));
-      connect(canvas,  SIGNAL(horizontalScroll(unsigned)),hscroll, SLOT(setPos(unsigned)));
+      // canvas's verticalScroll/horizontalScroll mean "move the view here" and
+      // come from several places (autoscroll, zoom pan, reveal-new-item, ...).
+      // The *BarSyncPos slots move the scrollbar and let its own cascade drive
+      // canvas/list/time. The wheel-scroll animation does not use this path -
+      // it drives everything per frame through *ScrollAnimated below.
+      connect(canvas,  SIGNAL(verticalScroll(unsigned)),SLOT(verticalScrollBarSyncPos(unsigned)));
+      connect(canvas,  SIGNAL(horizontalScroll(unsigned)),SLOT(horizontalScrollBarSyncPos(unsigned)));
       connect(canvas,  SIGNAL(horizontalScrollNoLimit(unsigned)),hscroll, SLOT(setPosNoLimit(unsigned))); 
       connect(time,    SIGNAL(timeChanged(unsigned)),   SLOT(setTime(unsigned)));
+
+      // Track list follows the canvas's smooth wheel-scroll animation
+      // directly (canvas keeps itself in sync internally). The time ruler
+      // follows the horizontal animation the same way.
+      connect(canvas,  SIGNAL(verticalScrollAnimated(unsigned)), SLOT(verticalScrollAnimatedSetYpos(unsigned)));
+      connect(canvas,  SIGNAL(horizontalScrollAnimated(unsigned)), SLOT(horizontalScrollAnimatedSetXpos(unsigned)));
+
+      // No animated scrolling while the zoom slider is dragged - see
+      // Canvas::setScrollAnimBlocked(). (vscroll is a plain QScrollBar here,
+      // it has no zoom slider.)
+      connect(hscroll, SIGNAL(scaleDragStateChanged(bool)), canvas, SLOT(setScrollAnimBlocked(bool)));
 
       connect(list, SIGNAL(verticalScrollSetYpos(unsigned)), this, SLOT(verticalScrollSetYpos(unsigned)));
 
@@ -1205,6 +1235,130 @@ void Arranger::setGlobalTempo(int val)
 void Arranger::verticalScrollSetYpos(unsigned ypos)
       {
       vscroll->setValue(ypos);
+      }
+
+//---------------------------------------------------------
+//   verticalScrollValueChanged
+//   Moving the canvas means a repaint, and that repaint runs synchronously on
+//   the thread that also has to repaint the scrollbar itself. Mice report at
+//   125 Hz and up, so handling every single drag step starves the scrollbar's
+//   own paint event and its handle visibly lags behind the cursor.
+//   Leading edge is applied immediately (the first step has no added latency),
+//   further steps inside the window are held back with only the newest value
+//   kept, and vScrollThrottleTick() flushes it. Values are never dropped, so
+//   the view can never end up somewhere other than where the handle is.
+//   Only handle drags are limited - wheel, keys, trough clicks and programmatic
+//   moves are applied at once as before.
+//---------------------------------------------------------
+
+void Arranger::verticalScrollValueChanged(int val)
+      {
+      if(!vscroll->isSliderDown())
+      {
+        _pendingVScrollVal = -1;
+        applyVerticalScroll(val);
+        return;
+      }
+
+      _pendingVScrollVal = val;
+
+      if(_vScrollThrottleTimer->isActive())
+        return;                       // inside the window - newest value wins
+
+      _pendingVScrollVal = -1;
+      _vScrollThrottleTimer->start(VSCROLL_DRAG_THROTTLE_MS);
+      applyVerticalScroll(val);
+      }
+
+void Arranger::vScrollThrottleTick()
+      {
+      if(_pendingVScrollVal < 0)
+        return;                       // burst over, let the window close
+
+      emitPendingVerticalScroll();
+      _vScrollThrottleTimer->start(VSCROLL_DRAG_THROTTLE_MS);
+      }
+
+//---------------------------------------------------------
+//   vScrollSliderReleased
+//   Flush at once so the view ends up exactly where the handle was let go.
+//---------------------------------------------------------
+
+void Arranger::vScrollSliderReleased()
+      {
+      _vScrollThrottleTimer->stop();
+      emitPendingVerticalScroll();
+      }
+
+void Arranger::emitPendingVerticalScroll()
+      {
+      if(_pendingVScrollVal < 0)
+        return;
+
+      const int val = _pendingVScrollVal;
+      _pendingVScrollVal = -1;
+      applyVerticalScroll(val);
+      }
+
+//---------------------------------------------------------
+//   applyVerticalScroll
+//   Canvas and track list always move in the same call, so they cannot show
+//   different rows for a frame.
+//---------------------------------------------------------
+
+void Arranger::applyVerticalScroll(int val)
+      {
+      canvas->setYPos(val);
+      list->setYPos(val);
+      }
+
+//---------------------------------------------------------
+//   verticalScrollBarSyncPos / horizontalScrollBarSyncPos
+//   Handlers for canvas's verticalScroll()/horizontalScroll(), which mean
+//   "move the view here". Those are NOT only emitted by the wheel-scroll
+//   animation: Canvas::scrollTimerDone() (autoscroll while dragging past an
+//   edge), the ctrl+wheel zoom pan, and PartCanvas's scroll-to-reveal-new-item
+//   all emit them too, and all of them need the canvas to actually follow.
+//   So these move the scrollbar NON-silently and let its own valueChanged/
+//   scrollChanged cascade drive canvas/list/time as it always did.
+//   NOTE: they were silent for a while, which broke every non-animation
+//   emitter above - the scrollbar moved but the canvas stayed put, and the
+//   two drifted apart until the user next touched the handle, at which point
+//   the view jumped (often close to 0).
+//   The wheel-scroll animation deliberately does NOT come through here; it
+//   keeps the scrollbar in step frame by frame via *ScrollAnimated below.
+//---------------------------------------------------------
+void Arranger::verticalScrollBarSyncPos(unsigned ypos)
+      {
+      vscroll->setValue(ypos);
+      }
+
+void Arranger::horizontalScrollBarSyncPos(unsigned xpos)
+      {
+      hscroll->setPos(xpos);
+      }
+
+//---------------------------------------------------------
+//   verticalScrollAnimatedSetYpos / horizontalScrollAnimatedSetXpos
+//   One frame of the canvas's wheel-scroll animation. The canvas has already
+//   positioned itself; here we bring everything that must stay visually locked
+//   to it along - track list, time ruler, and the scrollbar handle. The
+//   scrollbar is moved silently: the canvas is already there, so cascading
+//   back into its setXPos()/setYPos() would only cancel the animation that is
+//   driving us.
+//---------------------------------------------------------
+void Arranger::verticalScrollAnimatedSetYpos(unsigned ypos)
+      {
+      list->setYPos((int)ypos);
+      vscroll->blockSignals(true);
+      vscroll->setValue((int)ypos);
+      vscroll->blockSignals(false);
+      }
+
+void Arranger::horizontalScrollAnimatedSetXpos(unsigned xpos)
+      {
+      time->setXPos((int)xpos);
+      hscroll->setPosSilent(xpos);
       }
 
 //---------------------------------------------------------

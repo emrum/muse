@@ -4,7 +4,7 @@
 //    $Id: pianoroll.cpp,v 1.25.2.15 2009/11/16 11:29:33 lunar_shuttle Exp $
 //  (C) Copyright 1999 Werner Schweer (ws@seh.de)
 //  (C) Copyright 2012-2016 Tim E. Real (terminator356 on users dot sourceforge dot net)
-//
+// 
 //  This program is free software; you can redistribute it and/or
 //  modify it under the terms of the GNU General Public License
 //  as published by the Free Software Foundation; version 2 of
@@ -530,9 +530,24 @@ PianoRoll::PianoRoll(MusECore::PartList* pl, QWidget* parent, const char* name, 
 
       connect(canvas, SIGNAL(newWidth(int)), SLOT(newCanvasWidth(int)));
       connect(canvas, SIGNAL(pitchChanged(int)), piano, SLOT(setPitch(int)));   
-      connect(canvas, SIGNAL(verticalScroll(unsigned)), vscroll, SLOT(setPos(unsigned)));
-      connect(canvas,  SIGNAL(horizontalScroll(unsigned)),hscroll, SLOT(setPos(unsigned)));
+      // canvas's verticalScroll/horizontalScroll mean "move the view here" and come
+      // from several places (autoscroll while dragging, ctrl+wheel zoom pan,
+      // reveal-selection, ...). The *BarSyncPos slots move the scrollbar and let its
+      // own scrollChanged cascade drive canvas/piano/time, as it always did.
+      // The wheel-scroll animation does NOT use this path - it drives everything per
+      // frame through *ScrollAnimated below.
+      connect(canvas, SIGNAL(verticalScroll(unsigned)), SLOT(verticalScrollBarSyncPos(unsigned)));
+      connect(canvas, SIGNAL(horizontalScroll(unsigned)), SLOT(horizontalScrollBarSyncPos(unsigned)));
       connect(canvas,  SIGNAL(horizontalScrollNoLimit(unsigned)),hscroll, SLOT(setPosNoLimit(unsigned))); 
+      // Piano keyboard sidebar and time ruler follow the canvas's smooth
+      // wheel-scroll animation directly (canvas keeps itself in sync
+      // internally).
+      connect(canvas, SIGNAL(verticalScrollAnimated(unsigned)), SLOT(verticalScrollAnimatedSetYpos(unsigned)));
+      connect(canvas, SIGNAL(horizontalScrollAnimated(unsigned)), SLOT(horizontalScrollAnimatedSetXpos(unsigned)));
+
+      // No animated scrolling while a zoom slider is dragged - see Canvas::setScrollAnimBlocked().
+      connect(hscroll, SIGNAL(scaleDragStateChanged(bool)), canvas, SLOT(setScrollAnimBlocked(bool)));
+      connect(vscroll, SIGNAL(scaleDragStateChanged(bool)), canvas, SLOT(setScrollAnimBlocked(bool)));
       connect(canvas, SIGNAL(selectionChanged(int, MusECore::Event&, MusECore::Part*, bool)), this,
          SLOT(setSelection(int, MusECore::Event&, MusECore::Part*, bool)));
 
@@ -825,6 +840,46 @@ void PianoRoll::updateVScrollRange()
   if(piano)
     vscroll->setRange(0, piano->pianoHeight());
 }
+
+//---------------------------------------------------------
+//   verticalScrollBarSyncPos / horizontalScrollBarSyncPos
+//   See Arranger's identically-named slots for the full rationale: these
+//   handle "move the view here" and must NOT be silent - autoscroll, zoom pan
+//   and reveal-selection all emit verticalScroll()/horizontalScroll() and need
+//   the canvas to follow through the scrollbar's own cascade.
+//---------------------------------------------------------
+
+void PianoRoll::verticalScrollBarSyncPos(unsigned ypos)
+      {
+      vscroll->setPos(ypos);
+      }
+
+void PianoRoll::horizontalScrollBarSyncPos(unsigned xpos)
+      {
+      hscroll->setPos(xpos);
+      }
+
+//---------------------------------------------------------
+//   verticalScrollAnimatedSetYpos / horizontalScrollAnimatedSetXpos
+//   Adapters for canvas's *ScrollAnimated signals (unsigned) to piano's/
+//   time's existing setYPos(int)/setXPos(int) slots - a direct connection
+//   would silently fail to match at runtime since old-style SIGNAL/SLOT
+//   macros require exact parameter type strings.
+//---------------------------------------------------------
+
+void PianoRoll::verticalScrollAnimatedSetYpos(unsigned ypos)
+      {
+      piano->setYPos((int)ypos);
+      // Keep the handle in step with the animation, silently - the canvas is
+      // already there, and cascading back would cancel the animation.
+      vscroll->setPosSilent(ypos);
+      }
+
+void PianoRoll::horizontalScrollAnimatedSetXpos(unsigned xpos)
+      {
+      time->setXPos((int)xpos);
+      hscroll->setPosSilent(xpos);
+      }
 
 //---------------------------------------------------------
 //   follow

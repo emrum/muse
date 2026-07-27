@@ -94,6 +94,19 @@ class TList : public QWidget {
       bool resizeFlag;        // true if resize cursor is shown
       bool addTrackOpened = false;
 
+      // Cache of up to two currently-soloed tracks, used by paint() to
+      // highlight them. Previously recomputed by scanning the entire
+      // track list on every single paint() call - here it's only
+      // refreshed when songChanged() reports something that could affect
+      // solo state (see updateSoloTrackCache()), since paint() can now
+      // run many times in quick succession during a smooth wheel-scroll
+      // animation and re-scanning all tracks on each of those calls was
+      // wasted, repeated work unrelated to what was actually being
+      // repainted.
+      MusECore::Track* _cachedSoloTrack1;
+      MusECore::Track* _cachedSoloTrack2;
+      void updateSoloTrackCache();
+
       Header* header;
       QScrollBar* _scroll;
       QLineEdit* editor;

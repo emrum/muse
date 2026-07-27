@@ -35,6 +35,7 @@
 
 // Forward declarations:
 class QScrollBar;
+class QTimer;
 class QVBoxLayout;
 class QHBoxLayout;
 class QScrollArea;
@@ -75,6 +76,12 @@ class Arranger : public QWidget {
       static QByteArray header_state;
 
       ArrangerView* _parentWin;
+      // Rate limiting for the vertical scrollbar's drag cascade. vscroll is a plain
+      //  QScrollBar (no zoom slider on this axis), so it cannot use the equivalent
+      //  in ScrollScale - see verticalScrollValueChanged() for the reasoning.
+      //  _pendingVScrollVal < 0 means "nothing held back".
+      QTimer* _vScrollThrottleTimer;
+      int _pendingVScrollVal;
       QWidget* editor;
       int _raster;
       RasterizerModel *_rasterizerModel;
@@ -164,8 +171,35 @@ class Arranger : public QWidget {
         unsigned int frame = 0, MusECore::CtrlGUIMessage::Type type = MusECore::CtrlGUIMessage::PAINT_UPDATE);
       void focusCanvas();
       void verticalScrollSetYpos(unsigned);
+      // Throttled handler for vscroll's valueChanged while its handle is dragged.
+      // Canvas and track list are moved together from one place so that they can
+      // never end up showing different rows for a frame.
+      void verticalScrollValueChanged(int val);
+      void vScrollThrottleTick();
+      void vScrollSliderReleased();
+      // Used only by canvas's wheel-scroll animation (see
+      // Canvas::smoothScrollBy()): moves the scrollbar's own displayed
+      // position to the eventual target immediately, without re-triggering
+      // its valueChanged cascade to canvas/list - those instead follow the
+      // animation itself via canvas's *ScrollAnimated signals. Distinct
+      // from verticalScrollSetYpos() above, which TList's own keyboard
+      // navigation ("scroll selected track into view") still uses and
+      // which intentionally keeps the full instant cascade, since there's
+      // no animation involved for that interaction.
+      void verticalScrollBarSyncPos(unsigned);
+      void horizontalScrollBarSyncPos(unsigned);
+      // Adapters for canvas's *ScrollAnimated signals (unsigned) to list's/
+      // time's existing setYPos(int)/setXPos(int) slots - a direct
+      // connection would silently fail to match at runtime since
+      // old-style SIGNAL/SLOT macros require exact parameter type strings.
+      void verticalScrollAnimatedSetYpos(unsigned);
+      void horizontalScrollAnimatedSetXpos(unsigned);
       void toggleTrackHeights();
 
+
+   private:
+      void applyVerticalScroll(int val);
+      void emitPendingVerticalScroll();
 
    public:
       enum { CMD_DELETE,

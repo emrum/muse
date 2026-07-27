@@ -441,9 +441,21 @@ WaveEdit::WaveEdit(MusECore::PartList* pl, QWidget* parent, const char* name)
       connect(time,    SIGNAL(timeChanged(unsigned)),  SLOT(timeChanged(unsigned)));
       connect(canvas,    SIGNAL(timeChanged(unsigned)),  SLOT(setTime(unsigned)));
 
-      connect(canvas,  SIGNAL(horizontalScroll(unsigned)),hscroll, SLOT(setPos(unsigned)));
+      // canvas's horizontalScroll means "move the view here" and comes from several
+      // places (autoscroll while dragging, reveal-selection, ...).
+      // horizontalScrollBarSyncPos() moves hscroll and lets its own scrollChanged
+      // cascade drive canvas/time, as it always did.
+      // The wheel-scroll animation does NOT use this path - it drives everything per
+      // frame through horizontalScrollAnimated below.
+      connect(canvas,  SIGNAL(horizontalScroll(unsigned)),SLOT(horizontalScrollBarSyncPos(unsigned)));
       connect(canvas,  SIGNAL(horizontalScrollNoLimit(unsigned)),hscroll, SLOT(setPosNoLimit(unsigned))); 
+      // Time ruler follows the canvas's smooth wheel-scroll animation
+      // directly (canvas keeps itself in sync internally).
+      connect(canvas, SIGNAL(horizontalScrollAnimated(unsigned)), SLOT(horizontalScrollAnimatedSetXpos(unsigned)));
       connect(canvas, SIGNAL(curPartHasChanged(MusECore::Part*)), SLOT(updateTrackInfo()));
+
+      // No animated scrolling while the zoom slider is dragged - see Canvas::setScrollAnimBlocked().
+      connect(hscroll, SIGNAL(scaleDragStateChanged(bool)), canvas, SLOT(setScrollAnimBlocked(bool)));
 
       connect(hscroll, SIGNAL(scaleChanged(int)),  SLOT(updateHScrollRange()));
       connect(MusEGlobal::song, SIGNAL(songChanged(MusECore::SongChangedStruct_t)), SLOT(songChanged1(MusECore::SongChangedStruct_t)));
@@ -1096,6 +1108,35 @@ void WaveEdit::_setRaster(int raster)
           it->redrawCanvas();
       focusCanvas();
 }
+
+//---------------------------------------------------------
+//   horizontalScrollBarSyncPos
+//   See Arranger's identically-named slot for the full rationale: this handles
+//   "move the view here" and must NOT be silent - autoscroll and
+//   reveal-selection emit horizontalScroll() and need the canvas to follow
+//   through hscroll's own cascade.
+//---------------------------------------------------------
+
+void WaveEdit::horizontalScrollBarSyncPos(unsigned xpos)
+      {
+      hscroll->setPos(xpos);
+      }
+
+//---------------------------------------------------------
+//   horizontalScrollAnimatedSetXpos
+//   Adapter for canvas's horizontalScrollAnimated signal (unsigned) to
+//   time's existing setXPos(int) slot - a direct connection would
+//   silently fail to match at runtime since old-style SIGNAL/SLOT macros
+//   require exact parameter type strings.
+//---------------------------------------------------------
+
+void WaveEdit::horizontalScrollAnimatedSetXpos(unsigned xpos)
+      {
+      time->setXPos((int)xpos);
+      // Keep the handle in step with the animation, silently - the canvas is
+      // already there, and cascading back would cancel the animation.
+      hscroll->setPosSilent(xpos);
+      }
 
 //---------------------------------------------------------
 //   changeRaster

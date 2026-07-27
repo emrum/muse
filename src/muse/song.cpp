@@ -96,6 +96,14 @@ MusECore::Song* song = 0;
 
 namespace MusECore {
 
+#ifdef CLAP_SUPPORT
+// Defined in plugin_host_clap/clap_host_lib_core.cpp. Drives stop_processing()
+//  for every live CLAP instance on the audio thread and deactivate() on this
+//  (main) thread. See the call in Song::clear().
+extern void clapDeactivateAllBeforeAudioShutdown();
+#endif
+
+
 extern void clearMidiTransforms();
 extern void clearMidiInputTransforms();
 
@@ -4783,9 +4791,7 @@ void Song::clear(bool signal, bool clear_all)
       seedUndoDedupFromList("_outputs", _outputs, _tracks, undoRedoDedup);
       seedUndoDedupFromList("_groups",  _groups,  _tracks, undoRedoDedup);
       seedUndoDedupFromList("_auxs",    _auxs,    _tracks, undoRedoDedup);
-      // NOTE: unlike cleanupForQuit(), clear() never calls _synthIs.clearDelete(),
-      //  so synth tracks are NOT freed here - do not seed _synthIs, or a
-      //  DeleteTrack undo entry for a synth would be skipped and leak instead.
+      seedUndoDedupFromList("_synthIs", _synthIs, _tracks, undoRedoDedup);
 
       // Clear any midi control assignments.
       _midiAssignments.clear();
@@ -4813,6 +4819,22 @@ void Song::clear(bool signal, bool clear_all)
           MusEGlobal::midiPorts[i].setMidiDevice(0);
       }
       
+      // CLAP instances must be stopped and deactivated BEFORE they are destroyed:
+      //  plugin->destroy() on a still-activated instance is a host error, and u-he
+      //  plugins (Diva) abort on it - "host forgot to deactivate the plugin before
+      //  destroying it", then terminate. ~ClapSynthIF/shutdown() cannot repair it
+      //  on its own: plugin->stop_processing() is [audio-thread] and u-he enforce
+      //  that by thread identity, while the destructor chain below runs here on the
+      //  main thread.
+      // This is the same audio-thread round trip MusE::closeEvent() performs before
+      //  seqStop(). The audio engine is still live at this point, so the stop is
+      //  serviced on the correct thread and shutdown() then only has to destroy()
+      //  an already-inactive plugin.
+      // Must come before _synthIs.clearDelete() - that is what deletes them.
+      #ifdef CLAP_SUPPORT
+      clapDeactivateAllBeforeAudioShutdown();
+      #endif
+
       _synthIs.clearDelete();
 
       // p3.3.45 Make sure to delete Jack midi devices, and remove all ALSA midi device routes...

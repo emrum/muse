@@ -142,6 +142,25 @@ class MusE : public QMainWindow
         LoadingFinishStruct(Type type, Flags flags = NoFlag, const QString &fileName = QString());
     };
     QList<LoadingFinishStruct> _loadingFinishStructList;
+    // True while a deferred executeLoadingFinish() is queued in the event loop.
+    // While set, _loadingFinishStructList must NOT be cleared and no finishXxx()
+    //  may be called directly - append to the list instead, it will be processed in order.
+    bool _loadingFinishPending = false;
+    // Non-zero while we are inside one of the loading/clearing functions.
+    int _loadingClearScopeDepth = 0;
+    // RAII marker for the above. While it is alive, a queued executeLoadingFinish() must
+    //  not run: those functions call qApp->processEvents() (progress dialog, wait loops),
+    //  which dispatches queued timers and would otherwise execute the finishing functions
+    //  in the middle of the operation. Nesting is allowed (loadProjectFile -> clearSong).
+    class LoadingClearScope
+    {
+      MusE* _muse;
+      public:
+        explicit LoadingClearScope(MusE* muse) : _muse(muse) { ++_muse->_loadingClearScopeDepth; }
+        ~LoadingClearScope() { --_muse->_loadingClearScopeDepth; }
+        LoadingClearScope(const LoadingClearScope&) = delete;
+        LoadingClearScope& operator=(const LoadingClearScope&) = delete;
+    };
     struct ObjectDestructionStruct
     {
       QMetaObject::Connection _conn;
@@ -356,6 +375,9 @@ class MusE : public QMainWindow
     void finishLoadDefaultTemplate();
     void finishFileClose(bool restartSequencer);
     void executeLoadingFinish();
+    // Runs executeLoadingFinish() from the event loop, so that it is never
+    //  executed from within a destructor chain. See objectDestroyed().
+    void executeLoadingFinishDeferred();
 #endif
 
 signals:

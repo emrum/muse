@@ -164,6 +164,10 @@
 // For debugging song clearing and loading: Uncomment the fprintf section.
 #define DEBUG_LOADING_AND_CLEARING(dev, format, args...) // fprintf(dev, format, ##args);
 
+// How many processEvents() rounds clearSong() spends on a top window that refuses to
+//  close before it gives up and moves on. Guards against an endless busy loop.
+static const int MAX_TOPWIN_CLOSE_TRIES = 1000;
+
 namespace MusECore {
 extern void exitJackAudio();
 extern void exitDummyAudio();
@@ -250,6 +254,44 @@ bool MusE::ObjectDestructions::markAll(bool asWait)
 }
 #endif
 
+//---------------------------------------------------------
+//   The deferred clear/load finishing machinery
+//
+//   Why any of this exists: clearing or (re)loading a song has to destroy top
+//   windows, mixer strips and plugin GUIs, but those cannot be freed on the spot.
+//   They have live connections reaching in from outside their own widget tree -
+//   MusEGlobal::heartBeatTimer above all - so a strip freed while the timer is
+//   still hooked up would be called into after its track is gone. Qt frees widgets
+//   asynchronously anyway (deleteLater / DeferredDelete), so the rest of the
+//   operation has to wait for those deletions to actually happen.
+//
+//   How the pieces fit together:
+//
+//     1. Anything that must be waited for registers itself in its constructor with
+//        addPendingObjectDestruction(this)  ->  _pendingObjectDestructions.
+//        (AudioStrip, MidiStrip, the top windows, ... - grep for the call.)
+//
+//     2. clearSong()/loadProjectFile()/fileClose()/loadTemplate() mark those
+//        registrations as "wait for me" via _pendingObjectDestructions.markAll(true),
+//        append what they still have to do to _loadingFinishStructList as a
+//        LoadingFinishStruct, and then start closing windows and return. They do NOT
+//        finish their own job.
+//
+//     3. Each registered object's destroyed() signal lands in objectDestroyed(),
+//        which erases it. When the last waited-for object is gone, that queues
+//        executeLoadingFinishDeferred() through the event loop.
+//
+//     4. executeLoadingFinish() (below) then replays _loadingFinishStructList in
+//        order, calling the matching finishXxx() for each entry, and clears it.
+//
+//   Two rules make the difference between working and crashing, both learned the
+//   hard way - see the comments in objectDestroyed() and executeLoadingFinishDeferred():
+//     - the finish must NOT run synchronously from destroyed(), because that fires
+//       from inside ~QWidget while a widget tree is half destroyed;
+//     - it must NOT run from a nested qApp->processEvents() either, because the
+//       functions in step 2 call that themselves and are not done yet.
+//---------------------------------------------------------
+
 #ifndef USE_SENDPOSTEDEVENTS_FOR_TOPWIN_CLOSE
 void MusE::executeLoadingFinish()
 {
@@ -316,8 +358,55 @@ void MusE::objectDestroyed(QObject *obj)
   if(_pendingObjectDestructions.hasWaitingObjects())
     return;
 
+  if(_loadingFinishStructList.isEmpty())
+  {
+    DEBUG_LOADING_AND_CLEARING(stderr, "MusE::objectDestroyed nothing to finish\n");
+    return;
+  }
+
+  if(_loadingFinishPending)
+  {
+    DEBUG_LOADING_AND_CLEARING(stderr, "MusE::objectDestroyed loading finish already queued\n");
+    return;
+  }
+
   // All top level deletions that we were waiting for have now been deleted.
-  // Now it is safe to execute the finishing functions and clear the finishing list.
+  // CAUTION: We are called from QObject::destroyed(), that is from inside ~QWidget/~QObject.
+  //  The whole widget tree above us is currently being torn down, and
+  //  QObjectPrivate::deleteChildren() leaves null entries in the children lists while it
+  //  iterates. Anything walking the object tree now - findChildren<QDockWidget*>() in
+  //  closeDocks() for example - dereferences those null children and crashes
+  //  (qt_qFindChildren_helper has no null check).
+  // So let all destructors unwind and run the finishing functions from the event loop
+  //  instead. Passing 'this' as context object cancels the call if MusE is destroyed.
+  _loadingFinishPending = true;
+  QTimer::singleShot(0, this, &MusE::executeLoadingFinishDeferred);
+}
+
+void MusE::executeLoadingFinishDeferred()
+{
+  // A nested qApp->processEvents() (progress dialog, 'window did not close' wait loop)
+  //  dispatched us while we are still inside clearSong()/loadProjectFile()/fileClose().
+  // Running the finishing functions - and with them song->clear() - now would pull the
+  //  ground out from under the still-running operation. Try again a bit later.
+  if(_loadingClearScopeDepth > 0)
+  {
+    DEBUG_LOADING_AND_CLEARING(stderr, "MusE::executeLoadingFinishDeferred still in loading/clearing scope, re-queueing\n");
+    QTimer::singleShot(10, this, &MusE::executeLoadingFinishDeferred);
+    return;
+  }
+
+  _loadingFinishPending = false;
+
+  // New objects may have been scheduled for deletion in the meantime.
+  // The next objectDestroyed() will queue us again.
+  if(_pendingObjectDestructions.hasWaitingObjects())
+  {
+    DEBUG_LOADING_AND_CLEARING(stderr, "MusE::executeLoadingFinishDeferred still waiting for objects\n");
+    return;
+  }
+
+  DEBUG_LOADING_AND_CLEARING(stderr, "MusE::executeLoadingFinishDeferred executing\n");
   executeLoadingFinish();
 }
 #endif
@@ -1716,6 +1805,9 @@ bool MusE::loadProjectFile(const QString& name, bool songTemplate, bool doReadMi
 
       _busyWithLoading = true;
 
+      // Block a queued executeLoadingFinish() for the duration - we call processEvents() below.
+      const LoadingClearScope loadingClearScope(this);
+
       if(!progress)
           progress = new QProgressDialog(this);
 
@@ -1763,7 +1855,9 @@ bool MusE::loadProjectFile(const QString& name, bool songTemplate, bool doReadMi
       }
 
       // If there is nothing to wait for to be deleted, then just continue finishing.
-      if(!_pendingObjectDestructions.hasWaitingObjects())
+      // But if a deferred executeLoadingFinish() is already queued, append instead so that
+      //  the entries are processed in order and the queued run does not lose them.
+      if(!_loadingFinishPending && !_pendingObjectDestructions.hasWaitingObjects())
       {
         // Should already be clear, but just in case.
         _loadingFinishStructList.clear();
@@ -2130,7 +2224,9 @@ bool MusE::loadProjectFile1(const QString& name, bool songTemplate, bool doReadM
         return false;
 
       // If there is nothing to wait for to be deleted, then just continue finishing.
-      if(!_pendingObjectDestructions.hasWaitingObjects())
+      // But if a deferred executeLoadingFinish() is already queued, append instead so that
+      //  the entries are processed in order and the queued run does not lose them.
+      if(!_loadingFinishPending && !_pendingObjectDestructions.hasWaitingObjects())
       {
         // Should already be clear, but just in case.
         _loadingFinishStructList.clear();
@@ -2510,6 +2606,9 @@ void MusE::fileClose()
 
     _busyWithLoading = true;
 
+    // Block a queued executeLoadingFinish() for the duration - processEvents() is called below.
+    const LoadingClearScope loadingClearScope(this);
+
     // For now we just don't read the ports, leaving the last setup intact.
     const bool doReadMidiPorts = false;
 
@@ -2540,7 +2639,9 @@ void MusE::fileClose()
     }
 
     // If there is nothing to wait for to be deleted, then just continue finishing.
-    if(!_pendingObjectDestructions.hasWaitingObjects())
+    // But if a deferred executeLoadingFinish() is already queued, append instead so that
+    //  the entries are processed in order and the queued run does not lose them.
+    if(!_loadingFinishPending && !_pendingObjectDestructions.hasWaitingObjects())
     {
       // Should already be clear, but just in case.
       _loadingFinishStructList.clear();
@@ -2690,7 +2791,9 @@ void MusE::loadTemplate()
         return;
 
       // If there is nothing to wait for to be deleted, then just continue finishing.
-      if(!_pendingObjectDestructions.hasWaitingObjects())
+      // But if a deferred executeLoadingFinish() is already queued, append instead so that
+      //  the entries are processed in order and the queued run does not lose them.
+      if(!_loadingFinishPending && !_pendingObjectDestructions.hasWaitingObjects())
       {
         // Should already be clear, but just in case.
         _loadingFinishStructList.clear();
@@ -2752,7 +2855,9 @@ void MusE::loadDefaultTemplate()
       return;
 
     // If there is nothing to wait for to be deleted, then just continue finishing.
-    if(!_pendingObjectDestructions.hasWaitingObjects())
+    // But if a deferred executeLoadingFinish() is already queued, append instead so that
+    //  the entries are processed in order and the queued run does not lose them.
+    if(!_loadingFinishPending && !_pendingObjectDestructions.hasWaitingObjects())
     {
       // Should already be clear, but just in case.
       _loadingFinishStructList.clear();
@@ -3527,10 +3632,12 @@ MusEGui::ListEdit* MusE::findOpenListEditor(MusECore::PartList* pl) {
         return nullptr;
 
     for (const auto& d : findChildren<QDockWidget*>()) {
-        if (strcmp(d->widget()->metaObject()->className(), "MusEGui::ListEdit") != 0)
+        // qobject_cast: null-safe (a dock may have no widget at all) and it also
+        //  accepts subclasses, unlike the previous exact class name compare.
+        MusEGui::ListEdit* le = qobject_cast<MusEGui::ListEdit*>(d->widget());
+        if (!le)
             continue;
 
-        MusEGui::ListEdit* le = static_cast<MusEGui::ListEdit*>(d->widget());
         const MusECore::PartList* pl_tmp = le->parts();
 
         MusECore::ciPart ip = pl->cbegin();
@@ -4608,8 +4715,16 @@ bool MusE::clearSong(bool clear_all)
                 if(!tl->close())
                 {
                   fprintf(stderr, "MusE::clearSong TopWin:%p did not close! Waiting...\n", tl);
-                  while(!tl->close())
+                  // Bounded retry - see the note in the other clearSong() variant below.
+                  int tries = 0;
+                  while(!tl->close() && tries < MAX_TOPWIN_CLOSE_TRIES)
+                  {
+                    ++tries;
                     qApp->processEvents();
+                  }
+                  if(tries >= MAX_TOPWIN_CLOSE_TRIES)
+                    fprintf(stderr, "MusE::clearSong TopWin:%p still refuses to close after %d tries"
+                                    " - giving up on it\n", tl, tries);
                 }
             }
         }
@@ -4673,6 +4788,10 @@ bool MusE::clearSong(bool clear_all)
 //     // Are we already busy waiting for something while loading or closing another project?
 //     if(_busyWithLoading)
 //       return false;
+
+    // Block a queued executeLoadingFinish() for the duration - we call processEvents() below,
+    //  which would otherwise dispatch it while we are still closing the top windows.
+    const LoadingClearScope loadingClearScope(this);
 
     if (MusEGlobal::song->dirty) {
         int n = 0;
@@ -4768,8 +4887,22 @@ bool MusE::clearSong(bool clear_all)
                   // It is possible something held it up from closing.
                   fprintf(stderr, "MusE::clearSong TopWin:%p <%s> did not close! Waiting...\n",
                     tl, TopWin::typeName(tl->type()).toLocal8Bit().constData());
-                  while(!tl->close())
+
+                  // Bounded retry. An unbounded 'while(!tl->close()) processEvents()' spins at
+                  //  100% CPU forever if the window refuses to close (an ignored closeEvent(),
+                  //  a modal dialog of its own, ...) and it keeps a nested event loop running,
+                  //  which re-enters us. Give up after a while and carry on with the rest -
+                  //  a stuck window is bad, a frozen application is worse.
+                  int tries = 0;
+                  while(!tl->close() && tries < MAX_TOPWIN_CLOSE_TRIES)
+                  {
+                    ++tries;
                     qApp->processEvents();
+                  }
+                  if(tries >= MAX_TOPWIN_CLOSE_TRIES)
+                    fprintf(stderr, "MusE::clearSong TopWin:%p <%s> still refuses to close after %d tries"
+                                    " - giving up on it\n",
+                      tl, TopWin::typeName(tl->type()).toLocal8Bit().constData(), tries);
                 }
             }
         }
@@ -4791,10 +4924,19 @@ bool MusE::clearSong(bool clear_all)
     const bool nowHasWaitingObjects = _pendingObjectDestructions.hasWaitingObjects();
     if(!nowHasWaitingObjects)
     {
-      // Should already be clear, but just in case.
-      _loadingFinishStructList.clear();
-      if(!hasWaitingObjects)
-        finishClearSong(clear_all);
+      if(_loadingFinishPending)
+      {
+        // objectDestroyed() already queued a deferred executeLoadingFinish() which still
+        //  needs our ClearSong entry. Do not clear the list, do not finish here.
+        DEBUG_LOADING_AND_CLEARING(stderr, "MusE::clearSong loading finish is queued, leaving list intact\n");
+      }
+      else
+      {
+        // Should already be clear, but just in case.
+        _loadingFinishStructList.clear();
+        if(!hasWaitingObjects)
+          finishClearSong(clear_all);
+      }
     }
 
     // Just some useful info and previous tests and attempts...
@@ -6247,8 +6389,19 @@ void MusE::closeDocks() {
     hiddenDocks.clear();
     toggleDocksAction->setChecked(true);
 
+    // NOTE: Never call this (or anything else walking the object tree) from a
+    //  destructor or a destroyed() handler. See MusE::objectDestroyed().
     for (const auto& d : findChildren<QDockWidget *>()) {
-        if (strcmp(d->widget()->metaObject()->className(), "MusEGui::ListEdit") == 0)
+        QWidget* dw = d->widget();
+        if (!dw) {
+            fprintf(stderr, "MusE::closeDocks() dock <%s> has no widget\n",
+                    d->objectName().toLocal8Bit().constData());
+            if (d->isVisible())
+                d->hide();
+            continue;
+        }
+        // inherits() also catches subclasses, unlike the exact class name compare.
+        if (dw->inherits("MusEGui::ListEdit"))
             d->close();
         else if (d->isVisible()) {
             d->hide();
@@ -6269,7 +6422,10 @@ void MusE::addTabbedDock(Qt::DockWidgetArea area, QDockWidget *dock)
     } else {
         tabifyDockWidget(areaDocks.last(), dock);
 //        dock->raise(); // doesn't work, Qt problem (kybos)
-        QTimer::singleShot(0, [dock](){ dock->raise(); });
+        // Context object 'dock': if the dock is deleted before the timer fires
+        //  (song clear, plugin GUI closed, ...) the call is cancelled instead of
+        //  raising a dangling pointer.
+        QTimer::singleShot(0, dock, [dock](){ dock->raise(); });
     }
 }
 
@@ -6343,6 +6499,18 @@ QMenu* MusE::createPopupMenu() {
     menu->setObjectName("CheckmarkOnly");
     return menu;
 }
+
+//---------------------------------------------------------
+//   addPendingObjectDestruction
+//   Registers 'obj' as something a song clear/load must wait for before it may
+//   finish. Called by the object itself, from its own constructor - see
+//   AudioStrip/MidiStrip and the top windows. Registration alone does not block
+//   anything: clearSong() and friends decide per operation what to wait for, with
+//   _pendingObjectDestructions.markAll(true).
+//   The connection is keyed by the object pointer, so the entry disappears by
+//   itself when the object dies - there is deliberately no matching "remove"
+//   function. See the overview above executeLoadingFinish().
+//---------------------------------------------------------
 
 #ifndef USE_SENDPOSTEDEVENTS_FOR_TOPWIN_CLOSE
 void MusE::addPendingObjectDestruction(QObject* obj)

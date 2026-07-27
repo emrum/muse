@@ -116,6 +116,10 @@ class WaveEdit : public MidiEditor {
       void moveVerticalSlider(int val);
       void eventColorModeChanged(int);
       void _setRaster(int raster);
+      // See Arranger's identically-named slots (arranger.h/.cpp) for the
+      // full rationale.
+      void horizontalScrollBarSyncPos(unsigned);
+      void horizontalScrollAnimatedSetXpos(unsigned);
 
    public slots:
       void configChanged();
