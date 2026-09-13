@@ -30,14 +30,14 @@ jobs:
       uses: jurplel/install-qt-action@v2
       with:
         version: '6.8.8'
-      run: |
-          sudo apt install \
-              qt6-base-dev \
-              qt6-base-dev-tools \
-              qt6-tools-dev \
-              cmake \
-              ninja-build \
-              g++
+
+          # sudo apt install \
+          #     qt6-base-dev \
+          #     qt6-base-dev-tools \
+          #     qt6-tools-dev \
+          #     cmake \
+          #     ninja-build \
+          #     g++
               
     # - name: Check Qt Installation
     #   run: |
