@@ -10,7 +10,7 @@ env:
 
 jobs:
   compat:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
 
     steps:
     - uses: actions/checkout@v2
@@ -29,8 +29,16 @@ jobs:
     - name: Install Qt
       uses: jurplel/install-qt-action@v2
       with:
-        version: '5.9.5'
-        
+        version: '6.8.8'
+      run: |
+          sudo apt install \
+              qt6-base-dev \
+              qt6-base-dev-tools \
+              qt6-tools-dev \
+              cmake \
+              ninja-build \
+              g++
+              
     # - name: Check Qt Installation
     #   run: |
     #     QT_BASE_DIR=/usr
@@ -59,7 +67,7 @@ jobs:
       working-directory: ${{runner.workspace}}/build
       run: |
         REPO_PATH=$GITHUB_WORKSPACE/src  
-        export CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/undefined/Qt/5.9.5/gcc_64/lib/cmake/
+        export CMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/undefined/Qt/6.8.8/gcc_64/lib/cmake/
         cmake $REPO_PATH  -DCMAKE_BUILD_TYPE=$BUILD_TYPE -DCMAKE_SHARED_LINKER_FLAGS=-Wl,--no-undefined -DMODULES_BUILD_STATIC=ON
         
     - name: Build

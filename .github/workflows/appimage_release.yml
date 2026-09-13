@@ -5,7 +5,7 @@ on:
     inputs:
       tag:
         description: 'Release tag'
-        default: '4.0.0'
+        default: '5.0.0'
         required: true
 #on: push
 #  push:
@@ -19,7 +19,7 @@ env:
 
 jobs:
   release:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-26.04
 
     steps:
     - uses: actions/checkout@v2
@@ -34,13 +34,22 @@ jobs:
         sudo apt-get install -y cmake extra-cmake-modules
         sudo apt-get install -y libsndfile1-dev libsamplerate0-dev \
           libjack-jackd2-dev ladspa-sdk liblo-dev dssi-dev \
-          libsamplerate0-dev libfluidsynth-dev libgtkmm-2.4-dev \
+          libsamplerate0-dev libfluidsynth-dev  \
           libinstpatch-dev librubberband-dev python3-dev librtaudio-dev liblrdf0-dev
+        # removed above:  libgtkmm-2.4-dev
+        
         # liblash-compat-dev 
         # liblilv-dev lv2-dev liblrdf0-dev
-        sudo apt-get install -y qttools5-dev qttools5-dev-tools libqt5svg5-dev
+        ## QT 6.8.8 build tools 
+        sudo apt install \
+            qt6-base-dev \
+            qt6-base-dev-tools \
+            qt6-tools-dev \
+            cmake \
+            ninja-build \
+            g++
+
         sudo apt-get install -y mesa-common-dev libglu1-mesa-dev
-        #sudo apt-get install -y qt515base qt515tools qt515svg
         sudo apt-get install -y fuse
         
         sudo apt-get remove -y libsord-0-0 libserd-0-0
@@ -102,7 +111,7 @@ jobs:
     - name: Check Qt Installation
       run: |
         #cat /opt/qt515/bin/qt515-env.sh
-        QT_BASE_DIR=/opt/qt515
+        QT_BASE_DIR=/opt/qt688
         export QTDIR=$QT_BASE_DIR
         export PATH=$QT_BASE_DIR/bin:$PATH
         export LD_LIBRARY_PATH=$QT_BASE_DIR/lib/x86_64-linux-gnu:$QT_BASE_DIR/lib:$LD_LIBRARY_PATH
